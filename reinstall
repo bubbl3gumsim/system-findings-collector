@@ -9,9 +9,9 @@ $banner = @"
 
               R  U  L  E  S
 "@
-Write-Host $banner -ForegroundColor Cyan
+Write-Host $banner -ForegroundColor Yellow
 Write-Host ""
-Write-Host "  Roblox Clean Reinstall" -ForegroundColor DarkGray
+Write-Host "  Roblox Clean Reinstall" -ForegroundColor DarkYellow
 Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
 
