@@ -1,7 +1,7 @@
 Clear-Host
 
 # ============================================================
-# maestro: hows my vibe coding ;D
+# w vibe code
 # ============================================================
 $banner = @"
     _    ____    ____  _____ ____ ___  ____  ____ ___ _   _  ____
@@ -14,20 +14,14 @@ $banner = @"
 "@
 Write-Host $banner -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  Findings Collector" -ForegroundColor DarkGray
+Write-Host "  System Findings Collector" -ForegroundColor DarkGray
 Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
 
 # ============================================================
 # Collector script block (runs in background job)
 # ============================================================
-# LastActivityView.exe (NirSoft) is optional — if present next to this script,
-# section 16 will export its full activity timeline automatically.
-$scriptRoot = $PSScriptRoot
-
 $collector = {
-    param($ScriptRoot)
-
     $desktop = [Environment]::GetFolderPath('Desktop')
     $stamp   = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
     $temp    = Join-Path $env:TEMP "findings_$stamp"
