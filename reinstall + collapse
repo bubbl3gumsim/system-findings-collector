@@ -115,9 +115,9 @@ if (-not $installed) {
 
 Write-Host "Roblox install detected." -ForegroundColor Green
 Write-Host ""
-Write-Host "==================================================================" -ForegroundColor Cyan
-Write-Host " Please complete all listed rec rules in the document now." -ForegroundColor Cyan
-Write-Host "==================================================================" -ForegroundColor Cyan
+Write-Host "==============================================================================================" -ForegroundColor Cyan
+Write-Host " Please complete all listed recording rules in the Before Joining section of the document now." -ForegroundColor Cyan
+Write-Host "==============================================================================================" -ForegroundColor Cyan
 Write-Host ""
 
 # =========================================================================
