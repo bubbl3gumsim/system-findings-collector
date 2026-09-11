@@ -9,9 +9,9 @@ $banner = @"
 
               R  U  L  E  S
 "@
-Write-Host $banner -ForegroundColor DarkYellow
+Write-Host $banner -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  Roblox Clean Reinstall" -ForegroundColor DarkYellow
+Write-Host "  Roblox Clean Reinstall" -ForegroundColor DarkGray
 Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
 
@@ -19,10 +19,10 @@ Write-Host "This will fully delete Roblox and its saved data from this PC, then 
 Write-Host "This includes local settings/cache under the Roblox folder - it does NOT touch your Roblox account or anything saved to Roblox's servers." -ForegroundColor Yellow
 Write-Host ""
 Write-Host "IMPORTANT:" -ForegroundColor Red
-Write-Host "This will reset your FPS cap and reset your sensitivity." -ForegroundColor Yellow
-Write-Host "If you want to uncap your FPS, go to C:\Users\<you>\AppData\Local\Roblox," -ForegroundColor Yellow
-Write-Host "open GlobalBasicSettings_13 with Notepad, and edit:" -ForegroundColor Yellow
-Write-Host "    <int name=`"FramerateCap`">-1</int>" -ForegroundColor Yellow
+Write-Host "This will reset your FPS cap and reset your sensitivity." -ForegroundColor Red
+Write-Host "If you want to uncap your FPS, go to C:\Users\<you>\AppData\Local\Roblox," -ForegroundColor Red
+Write-Host "open GlobalBasicSettings_13 with Notepad, and edit:" -ForegroundColor Red
+Write-Host "    <int name=`"FramerateCap`">-1</int>" -ForegroundColor Red
 Write-Host "(This is the ONLY permissible change that is allowed.)" -ForegroundColor Red
 Write-Host ""
 
@@ -77,8 +77,21 @@ try {
     Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
     Write-Host "Downloaded to: $installerPath" -ForegroundColor Green
 
-    Write-Host "Launching installer..." -ForegroundColor Cyan
-    Start-Process -FilePath $installerPath
+    Write-Host "Launching installer (pass 1 of 2)..." -ForegroundColor Cyan
+    Start-Process -FilePath $installerPath -Wait
+
+    Write-Host "First pass done. Waiting a moment before the second pass..." -ForegroundColor Gray
+    Start-Sleep -Seconds 3
+
+    # Kill Roblox if the first pass auto-launched it, so the second install pass isn't fighting a running instance
+    Get-Process RobloxPlayerBeta, RobloxPlayerLauncher -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Seconds 1
+
+    Write-Host "Launching installer (pass 2 of 2)..." -ForegroundColor Cyan
+    Start-Process -FilePath $installerPath -Wait
+
+    Write-Host "Both install passes complete." -ForegroundColor Green
+    Write-Host "Note: if browser links still don't launch Roblox, the issue is most likely a stale roblox-player protocol registry entry, not the install itself - see the troubleshooting steps if this happens again." -ForegroundColor Gray
 } catch {
     Write-Host "Download failed: $_" -ForegroundColor Red
     Write-Host "Falling back to opening the download page in your browser." -ForegroundColor Yellow
