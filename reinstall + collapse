@@ -27,8 +27,8 @@ Write-Host "    <int name=`"FramerateCap`">-1</int>" -ForegroundColor Red
 Write-Host "(This is the ONLY permissible change that is allowed.)" -ForegroundColor Red
 Write-Host ""
 Write-Host "After the reinstall, you'll be asked to launch Roblox and join your game. Once you confirm" -ForegroundColor Yellow
-Write-Host "you've joined, this script will close every non-essential process on the PC (see whitelist" -ForegroundColor Yellow
-Write-Host "below) so nothing extra is running in the background during recording." -ForegroundColor Yellow
+Write-Host "you've joined, this script will close every non-essential process on the PC" -ForegroundColor Yellow
+Write-Host "so nothing extra is running in the background during recording." -ForegroundColor Yellow
 Write-Host ""
 
 $confirm = Read-Host "Continue? (Y/N)"
@@ -124,7 +124,7 @@ Write-Host ""
 # STAGE 2: Wait for the user to launch Roblox and join their game
 # =========================================================================
 
-Write-Host "Launch Roblox and join your game now." -ForegroundColor Yellow
+Write-Host "Complete all the “Before Joining” steps in the document before joining Roblox." -ForegroundColor Pink
 Read-Host "Once you have joined, press Enter here to confirm"
 
 $robloxRunning = Get-Process RobloxPlayerBeta -ErrorAction SilentlyContinue
