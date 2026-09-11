@@ -1,7 +1,7 @@
 Clear-Host
 
 # ============================================================
-# w vibe code
+# Banner
 # ============================================================
 $banner = @"
     _    ____    ____  _____ ____ ___  ____  ____ ___ _   _  ____
@@ -17,6 +17,19 @@ Write-Host ""
 Write-Host "  System Findings Collector" -ForegroundColor DarkGray
 Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
+
+# ============================================================
+# Elevation check - several artifacts (Prefetch, Event Logs,
+# full Program Files scan) need admin rights to read completely
+# ============================================================
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if (-not $isAdmin) {
+    Write-Host "  WARNING: Not running as Administrator." -ForegroundColor Yellow
+    Write-Host "  Prefetch, Event Logs, and some other artifacts may come back empty or partial." -ForegroundColor Yellow
+    Write-Host ""
+}
 
 # ============================================================
 # Collector script block (runs in background job)
@@ -38,8 +51,14 @@ $collector = {
 
     # 1. Process list with parentage + file size
     Save "01_process_parentage" {
+        # Build PID -> Name map once instead of calling Get-Process per row
+        $parentMap = @{}
+        Get-Process | ForEach-Object { $parentMap[$_.Id] = $_.Name }
+
         Get-CimInstance Win32_Process | Select-Object Name, ProcessId,
-            @{n='ParentName';e={(Get-Process -Id $_.ParentProcessId -ErrorAction SilentlyContinue).Name}},
+            @{n='ParentName';e={
+                if ($parentMap.ContainsKey([int]$_.ParentProcessId)) { $parentMap[[int]$_.ParentProcessId] } else { $null }
+            }},
             @{n='SizeMB';e={
                 if ($_.ExecutablePath -and (Test-Path $_.ExecutablePath)) {
                     [math]::Round((Get-Item $_.ExecutablePath -ErrorAction SilentlyContinue).Length / 1MB, 2)
@@ -70,11 +89,19 @@ $collector = {
     }
 
     # 7. Unsigned exes in Program Files (with size + hash)
-    $unsigned = Get-ChildItem -Path 'C:\Program Files','C:\Program Files (x86)' -Recurse -Include *.exe -ErrorAction SilentlyContinue |
-        Get-AuthenticodeSignature |
+    $pfPaths = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) |
+        Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+    $pfFiles = Get-ChildItem -Path $pfPaths -Recurse -Include *.exe -ErrorAction SilentlyContinue
+
+    # Size map built up front so we don't hit disk again per file later
+    $sizeMap = @{}
+    foreach ($f in $pfFiles) { $sizeMap[$f.FullName] = $f.Length }
+
+    $unsigned = $pfFiles | Get-AuthenticodeSignature |
         Where-Object { $_.Status -ne 'Valid' } |
         Select-Object Path, Status,
-            @{n='SizeMB';e={ [math]::Round((Get-Item $_.Path -ErrorAction SilentlyContinue).Length / 1MB, 2) }}
+            @{n='SizeMB';e={ if ($sizeMap.ContainsKey($_.Path)) { [math]::Round($sizeMap[$_.Path] / 1MB, 2) } else { $null } }}
 
     Save "07_unsigned_program_files_exes" { $unsigned }
 
@@ -93,103 +120,104 @@ $collector = {
         Get-ChildItem Cert:\LocalMachine\Root | Select-Object Subject, Thumbprint, NotBefore | Sort-Object NotBefore -Descending
     }
 
-    # 9. Virtualization / systeminfo (repeat)
-    Save "09_systeminfo_virtualization_repeat" {
-        systeminfo | findstr /i "hyper os version page virtualization"
-    }
-
-    # 10. collect_report.ps1 notice
-    Save "10_collect_report_notice" {
+    # 9. collect_report.ps1 notice
+    Save "09_collect_report_notice" {
         "This step calls an external script (.\collect_report.ps1) whose contents were not provided,"
         "so it has not been bundled or run here. Read any unknown script before running it."
     }
 
-    # 11. Prefetch files
-    Save "11_prefetch_files" {
+    # 10. Prefetch files (summary, sizes included)
+    Save "10_prefetch_files" {
         Get-ChildItem "$env:WINDIR\Prefetch" -Filter *.pf -ErrorAction SilentlyContinue |
-            Select-Object Name, CreationTime, LastWriteTime, LastAccessTime |
+            Select-Object Name,
+                @{n='SizeKB';e={[math]::Round($_.Length / 1KB, 2)}},
+                CreationTime, LastWriteTime, LastAccessTime |
             Sort-Object LastWriteTime -Descending
     }
 
-    # 12. Recent items (shell:recent)
-    Save "12_recent_items" {
+    # 11. Recent items (shell:recent), sizes included
+    Save "11_recent_items" {
         $recentPath = "$env:APPDATA\Microsoft\Windows\Recent"
         Get-ChildItem $recentPath -ErrorAction SilentlyContinue |
-            Select-Object Name, CreationTime, LastWriteTime |
+            Select-Object Name,
+                @{n='SizeKB';e={[math]::Round($_.Length / 1KB, 2)}},
+                CreationTime, LastWriteTime |
             Sort-Object LastWriteTime -Descending
     }
 
-    # 13. Recent items resolved targets
-    Save "13_recent_items_targets" {
+    # 12. Recent items resolved targets (lnk size + target size)
+    Save "12_recent_items_targets" {
         $sh = New-Object -ComObject WScript.Shell
         Get-ChildItem "$env:APPDATA\Microsoft\Windows\Recent" -Filter *.lnk -ErrorAction SilentlyContinue |
             ForEach-Object {
                 try {
                     $lnk = $sh.CreateShortcut($_.FullName)
+                    $targetSizeKB = $null
+                    if ($lnk.TargetPath -and (Test-Path $lnk.TargetPath)) {
+                        $targetSizeKB = [math]::Round((Get-Item $lnk.TargetPath -ErrorAction SilentlyContinue).Length / 1KB, 2)
+                    }
                     [PSCustomObject]@{
                         Name          = $_.Name
                         Target        = $lnk.TargetPath
                         Arguments     = $lnk.Arguments
+                        LnkSizeKB     = [math]::Round($_.Length / 1KB, 2)
+                        TargetSizeKB  = $targetSizeKB
                         LastWriteTime = $_.LastWriteTime
                     }
                 } catch {
-                    [PSCustomObject]@{ Name = $_.Name; Target = "ERROR"; Arguments = ""; LastWriteTime = $_.LastWriteTime }
-                }
-            }
-    }
-
-    # 14. Processes currently running alongside Roblox (context for injector detection)
-    Save "14_processes_running_with_roblox" {
-        $robloxRunning = Get-Process | Where-Object { $_.ProcessName -match 'Roblox' }
-        if ($robloxRunning) {
-            "Roblox process(es) found:"
-            $robloxRunning | Select-Object ProcessName, Id, StartTime, Path
-            ""
-            "All other running processes at time of scan (review for anything unfamiliar):"
-            Get-Process | Where-Object { $_.ProcessName -notmatch 'Roblox' } |
-                Select-Object ProcessName, Id, StartTime,
-                    @{n='Path';e={ $_.Path }} |
-                Sort-Object ProcessName
-        } else {
-            "Roblox does not appear to be running right now. Run this while Roblox is open for useful results."
-        }
-    }
-
-    # 15. Unsigned / suspicious DLLs loaded into any running process
-    Save "15_suspicious_loaded_modules" {
-        "Scanning loaded modules of all accessible processes for unsigned DLLs outside system folders."
-        "This can take a minute. Access-denied processes (protected/system) are skipped automatically."
-        ""
-        $sysPaths = @("$env:WINDIR\System32", "$env:WINDIR\SysWOW64")
-        foreach ($proc in Get-Process -ErrorAction SilentlyContinue) {
-            try {
-                foreach ($mod in $proc.Modules) {
-                    $inSystemPath = $sysPaths | Where-Object { $mod.FileName -like "$_*" }
-                    if (-not $inSystemPath) {
-                        $sig = Get-AuthenticodeSignature -FilePath $mod.FileName -ErrorAction SilentlyContinue
-                        if ($sig.Status -ne 'Valid') {
-                            [PSCustomObject]@{
-                                Process    = $proc.ProcessName
-                                PID        = $proc.Id
-                                Module     = $mod.ModuleName
-                                ModulePath = $mod.FileName
-                                SigStatus  = $sig.Status
-                            }
-                        }
+                    [PSCustomObject]@{
+                        Name = $_.Name; Target = "ERROR"; Arguments = ""
+                        LnkSizeKB = $null; TargetSizeKB = $null; LastWriteTime = $_.LastWriteTime
                     }
                 }
-            } catch {
-                # Access denied on protected processes — expected and skipped
             }
-        }
     }
 
     # ------------------------------------------------------------
-    # Zip everything up
+    # Raw artifact copies -> logs\Prefetch, logs\Recent, logs\EventLogs
     # ------------------------------------------------------------
-    $zipPath = Join-Path $desktop "findings.zip"
+    $logsRoot = Join-Path $temp "logs"
+    New-Item -ItemType Directory -Path $logsRoot -Force | Out-Null
+
+    function Copy-Artifact($label, $source, $destSubfolder) {
+        $dest = Join-Path $logsRoot $destSubfolder
+        try {
+            if (Test-Path $source) {
+                New-Item -ItemType Directory -Path $dest -Force | Out-Null
+                Copy-Item -Path (Join-Path $source '*') -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+                $copied  = Get-ChildItem $dest -Recurse -File -ErrorAction SilentlyContinue
+                $count   = $copied.Count
+                $sizeMB  = [math]::Round((($copied | Measure-Object Length -Sum).Sum) / 1MB, 2)
+                "OK   [$label] $count files, $sizeMB MB copied from '$source' -> logs\$destSubfolder"
+            } else {
+                "SKIP [$label] source not found: $source"
+            }
+        } catch {
+            "FAIL [$label] error copying from '$source': $_"
+        }
+    }
+
+    $copyLog = @()
+    $copyLog += Copy-Artifact "Prefetch"          "$env:WINDIR\Prefetch"                     "Prefetch"
+    $copyLog += Copy-Artifact "Recent items"      "$env:APPDATA\Microsoft\Windows\Recent"     "Recent"
+    $copyLog += Copy-Artifact "Windows Event Logs" "$env:WINDIR\System32\winevt\Logs"         "EventLogs"
+    $copyLog | Set-Content -Path (Join-Path $temp "13_raw_artifact_copy_log.txt") -Encoding UTF8
+
+    # ------------------------------------------------------------
+    # Zip everything up into Desktop\AC-FINDINGS\FINDINGS-<stamp>.zip
+    # Using System.IO.Compression directly - noticeably faster than
+    # Compress-Archive once Prefetch + Event Logs are in the mix.
+    # ------------------------------------------------------------
+    $acFolder = Join-Path $desktop "AC-FINDINGS"
+    New-Item -ItemType Directory -Path $acFolder -Force | Out-Null
+
+    $zipPath = Join-Path $acFolder "FINDINGS-$stamp.zip"
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-    Compress-Archive -Path "$temp\*" -DestinationPath $zipPath -Force
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $temp, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+
     Remove-Item $temp -Recurse -Force
 
     return $zipPath
@@ -208,14 +236,28 @@ while ($job.State -eq 'Running') {
     $i++
 }
 
+Write-Host -NoNewline "`r"
+
+if ($job.State -eq 'Failed') {
+    Write-Host "  Collection FAILED.                  " -ForegroundColor Red
+    Write-Host ""
+    Receive-Job -Job $job -ErrorAction SilentlyContinue 2>&1 | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    Remove-Job -Job $job
+    return
+}
+
 $zipPath = Receive-Job -Job $job
 Remove-Job -Job $job
 
-Write-Host -NoNewline "`r"
+$zipSizeMB = if (Test-Path $zipPath) { [math]::Round((Get-Item $zipPath).Length / 1MB, 2) } else { $null }
+
 Write-Host "  Loading findings... done!          " -ForegroundColor Green
 Write-Host ""
 Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host "  Output saved to:" -ForegroundColor White
 Write-Host "  $zipPath" -ForegroundColor Yellow
+if ($zipSizeMB) {
+    Write-Host "  Size: $zipSizeMB MB" -ForegroundColor Yellow
+}
 Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
