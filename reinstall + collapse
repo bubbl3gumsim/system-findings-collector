@@ -125,7 +125,13 @@ Write-Host ""
 # =========================================================================
 
 Write-Host "Launch Roblox and join your game now." -ForegroundColor Yellow
-Read-Host "Once you have joined, press Enter here to confirm"
+Write-Host ""
+Write-Host "=== Recording Level Rules ===" -ForegroundColor Magenta
+Write-Host "L3: You are NOT allowed to open ANYTHING after this point." -ForegroundColor Red
+Write-Host "L2: You may ONLY have Discord open. Do not open anything else." -ForegroundColor Yellow
+Write-Host "Follow the level you were assigned before pressing Enter." -ForegroundColor White
+Write-Host ""
+Read-Host "Once you have joined and followed the rules above, press Enter to continue"
 
 $robloxRunning = Get-Process RobloxPlayerBeta -ErrorAction SilentlyContinue
 if (-not $robloxRunning) {
@@ -142,10 +148,13 @@ if (-not $robloxRunning) {
 # =========================================================================
 
 Write-Host ""
-Write-Host "=== Close Non-Essential Processes ===" -ForegroundColor Cyan
+Write-Host "╔══════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor DarkCyan
+Write-Host "║                    CLOSE NON-ESSENTIAL PROCESSES                            ║" -ForegroundColor Cyan
+Write-Host "╚══════════════════════════════════════════════════════════════════════════════╝" -ForegroundColor DarkCyan
 Write-Host "This closes EVERYTHING except the core Windows processes needed to keep the OS running, plus Roblox itself." -ForegroundColor Yellow
-Write-Host "That includes antivirus/security tray tools, background apps, and anything else - no exceptions beyond the list below." -ForegroundColor Yellow
+Write-Host "That includes antivirus/security tray tools, background apps, and anything else - no exceptions beyond the list below." -ForegroundColor DarkYellow
 Write-Host "Unsaved work in other apps WILL be lost. Save everything first." -ForegroundColor Red
+Write-Host "Press Enter above only after you have finished saving work and followed the L2/L3 rules." -ForegroundColor Magenta
 Write-Host ""
 
 # --- Core OS processes that must never be touched ---
@@ -227,22 +236,78 @@ if (-not $candidates) {
             Stop-Process -Id $proc.Id -Force -ErrorAction Stop
             $status = "Closed"
         } catch {
-            # Some processes (protected, elevated, or actively resisting termination)
-            # don't respond to Stop-Process. Fall back to taskkill with /T to also
-            # take down any child processes it spawned.
+            # If normal process termination fails, check whether this PID belongs
+            # to a Windows service. This applies to ANY service, not just warp-svc.
             try {
-                $tkOut = & taskkill /F /T /PID $proc.Id 2>&1
-                if ($LASTEXITCODE -eq 0) {
-                    $status = "Closed (via taskkill fallback)"
+                $servicesForPid = Get-CimInstance Win32_Service -Filter "ProcessId = $($proc.Id)" -ErrorAction Stop
+
+                if ($servicesForPid) {
+                    $stoppedServiceNames = @()
+
+                    foreach ($svc in $servicesForPid) {
+                        try {
+                            $service = Get-Service -Name $svc.Name -ErrorAction Stop
+
+                            if ($service.Status -ne "Stopped") {
+                                Stop-Service -Name $svc.Name -Force -ErrorAction Stop
+                                $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(10))
+                            }
+
+                            $stoppedServiceNames += $svc.Name
+                        } catch {
+                            # Keep trying other services attached to this PID.
+                        }
+                    }
+
+                    Start-Sleep -Milliseconds 500
+
+                    if (-not (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue)) {
+                        if ($stoppedServiceNames.Count -gt 0) {
+                            $status = "Closed (service stopped: $($stoppedServiceNames -join ', '))"
+                        } else {
+                            $status = "Service found, but could not be stopped"
+                        }
+                    } else {
+                        # Service stop succeeded but the hosting process is still alive.
+                        # Try normal taskkill, without attempting to bypass protection.
+                        try {
+                            $tkOut = & taskkill /F /PID $proc.Id 2>&1
+                            if ($LASTEXITCODE -eq 0) {
+                                $status = "Closed (service stopped + taskkill)"
+                            } else {
+                                $status = "Failed to close: $tkOut"
+                            }
+                        } catch {
+                            $status = "Failed to close: $($_.Exception.Message)"
+                        }
+                    }
                 } else {
-                    $status = "Failed to close: $tkOut"
+                    # Not a service: use the normal taskkill fallback.
+                    try {
+                        $tkOut = & taskkill /F /PID $proc.Id 2>&1
+                        if ($LASTEXITCODE -eq 0) {
+                            $status = "Closed (via taskkill fallback)"
+                        } else {
+                            $status = "Failed to close: $tkOut"
+                        }
+                    } catch {
+                        $status = "Failed to close: $($_.Exception.Message)"
+                    }
                 }
             } catch {
-                $status = "Failed to close: $_"
+                $status = "Failed to close: $($_.Exception.Message)"
             }
         }
 
-        $color = if ($suspicious) { "Red" } else { "DarkGray" }
+        if ($suspicious) {
+            $color = "Red"
+        } elseif ($status -like "Closed*") {
+            $color = "Green"
+        } elseif ($status -like "Failed*") {
+            $color = "DarkYellow"
+        } else {
+            $color = "Gray"
+        }
         Write-Host ("{0,-25} PID {1,-7} {2}" -f $proc.ProcessName, $proc.Id, $status) -ForegroundColor $color
     }
 
