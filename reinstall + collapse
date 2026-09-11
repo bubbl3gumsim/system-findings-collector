@@ -27,8 +27,8 @@ Write-Host "    <int name=`"FramerateCap`">-1</int>" -ForegroundColor Red
 Write-Host "(This is the ONLY permissible change that is allowed.)" -ForegroundColor Red
 Write-Host ""
 Write-Host "After the reinstall, you'll be asked to launch Roblox and join your game. Once you confirm" -ForegroundColor Yellow
-Write-Host "you've joined, this script will close every non-essential process on the PC" -ForegroundColor Yellow
-Write-Host "so nothing extra is running in the background during recording." -ForegroundColor Yellow
+Write-Host "you've joined, this script will close every non-essential process on the PC (see whitelist" -ForegroundColor Yellow
+Write-Host "below) so nothing extra is running in the background during recording." -ForegroundColor Yellow
 Write-Host ""
 
 $confirm = Read-Host "Continue? (Y/N)"
@@ -124,7 +124,7 @@ Write-Host ""
 # STAGE 2: Wait for the user to launch Roblox and join their game
 # =========================================================================
 
-Write-Host "Complete all the “Before Joining” steps in the document before joining Roblox." -ForegroundColor Pink
+Write-Host "Launch Roblox and join your game now." -ForegroundColor Yellow
 Read-Host "Once you have joined, press Enter here to confirm"
 
 $robloxRunning = Get-Process RobloxPlayerBeta -ErrorAction SilentlyContinue
@@ -143,27 +143,21 @@ if (-not $robloxRunning) {
 
 Write-Host ""
 Write-Host "=== Close Non-Essential Processes ===" -ForegroundColor Cyan
-Write-Host "This closes everything except processes required for Windows to run, your antivirus, and Roblox itself." -ForegroundColor Yellow
+Write-Host "This closes EVERYTHING except the core Windows processes needed to keep the OS running, plus Roblox itself." -ForegroundColor Yellow
+Write-Host "That includes antivirus/security tray tools, background apps, and anything else - no exceptions beyond the list below." -ForegroundColor Yellow
 Write-Host "Unsaved work in other apps WILL be lost. Save everything first." -ForegroundColor Red
 Write-Host ""
 
 # --- Core OS processes that must never be touched ---
+# This is now the ONLY whitelist besides Roblox - nothing else is spared.
 $systemWhitelist = @(
     "System", "Idle", "Registry", "smss", "csrss", "wininit", "winlogon",
     "services", "lsass", "lsm", "svchost", "dwm", "explorer", "fontdrvhost",
     "RuntimeBroker", "sihost", "taskhostw", "ctfmon", "conhost", "dllhost",
     "WUDFHost", "SearchIndexer", "SearchHost", "StartMenuExperienceHost",
     "ShellExperienceHost", "ApplicationFrameHost", "TextInputHost",
-    "SecurityHealthService", "SecurityHealthSystray", "spoolsv", "audiodg",
+    "spoolsv", "audiodg",
     "powershell", "pwsh", "WindowsTerminal", "OpenConsole", "cmd"
-)
-
-# Common antivirus / endpoint protection process names - kept alive for safety
-$avWhitelist = @(
-    "MsMpEng", "NisSrv", "SecurityHealthService", "MsSense", "SenseIR",
-    "avastui", "avastsvc", "avgui", "avgsvc", "mcshield", "mfemms",
-    "bdagent", "bdservicehost", "nortonsecurity", "ns", "ccsvchd",
-    "avp", "avpui", "malwarebytes", "mbamservice", "mbamtray"
 )
 
 # Roblox itself - the whole point of this stage is to keep the game running
@@ -172,7 +166,7 @@ $robloxWhitelist = @(
     "RobloxPlayerBeta", "RobloxPlayerLauncher", "RobloxCrashHandler"
 )
 
-$whitelist = ($systemWhitelist + $avWhitelist + $robloxWhitelist) | ForEach-Object { $_.ToLower() }
+$whitelist = ($systemWhitelist + $robloxWhitelist) | ForEach-Object { $_.ToLower() }
 
 # Don't kill our own process tree
 $selfPid = $PID
@@ -233,7 +227,19 @@ if (-not $candidates) {
             Stop-Process -Id $proc.Id -Force -ErrorAction Stop
             $status = "Closed"
         } catch {
-            $status = "Failed to close: $_"
+            # Some processes (protected, elevated, or actively resisting termination)
+            # don't respond to Stop-Process. Fall back to taskkill with /T to also
+            # take down any child processes it spawned.
+            try {
+                $tkOut = & taskkill /F /T /PID $proc.Id 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    $status = "Closed (via taskkill fallback)"
+                } else {
+                    $status = "Failed to close: $tkOut"
+                }
+            } catch {
+                $status = "Failed to close: $_"
+            }
         }
 
         $color = if ($suspicious) { "Red" } else { "DarkGray" }
@@ -257,11 +263,15 @@ if (-not $candidates) {
     }
 
     # Save full log for review
-    $logPath = Join-Path $env:TEMP "closed-processes-log.csv"
+    $logDir = "C:\Users\ayat0\OneDrive\Desktop\AC-FINDINGS"
+    if (-not (Test-Path $logDir)) {
+        New-Item -Path $logDir -ItemType Directory -Force | Out-Null
+    }
+    $logPath = Join-Path $logDir "log-58598257.csv"
     $log | Export-Csv -Path $logPath -NoTypeInformation
     Write-Host ""
     Write-Host "Full log saved to: $logPath" -ForegroundColor Gray
 }
 
 Write-Host ""
-Write-Host "All done. Roblox is reinstalled, you're joined, and background processes are cleared." -ForegroundColor Green
+Write-Host "All done. Roblox is reinstalled, you're joined, and background processes are cleared. Play your Matches" -ForegroundColor Green
