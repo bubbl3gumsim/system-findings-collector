@@ -1,7 +1,7 @@
 Clear-Host
 
 # ============================================================
-# Maestro: Like my vibe coding?
+# maestro: hows my vibe coding ;D
 # ============================================================
 $banner = @"
     _    ____    ____  _____ ____ ___  ____  ____ ___ _   _  ____
@@ -14,14 +14,20 @@ $banner = @"
 "@
 Write-Host $banner -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  System Findings Collector" -ForegroundColor DarkGray
+Write-Host "  Findings Collector" -ForegroundColor DarkGray
 Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
 
 # ============================================================
 # Collector script block (runs in background job)
 # ============================================================
+# LastActivityView.exe (NirSoft) is optional — if present next to this script,
+# section 16 will export its full activity timeline automatically.
+$scriptRoot = $PSScriptRoot
+
 $collector = {
+    param($ScriptRoot)
+
     $desktop = [Environment]::GetFolderPath('Desktop')
     $stamp   = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
     $temp    = Join-Path $env:TEMP "findings_$stamp"
@@ -136,6 +142,52 @@ $collector = {
                     [PSCustomObject]@{ Name = $_.Name; Target = "ERROR"; Arguments = ""; LastWriteTime = $_.LastWriteTime }
                 }
             }
+    }
+
+    # 14. Processes currently running alongside Roblox (context for injector detection)
+    Save "14_processes_running_with_roblox" {
+        $robloxRunning = Get-Process | Where-Object { $_.ProcessName -match 'Roblox' }
+        if ($robloxRunning) {
+            "Roblox process(es) found:"
+            $robloxRunning | Select-Object ProcessName, Id, StartTime, Path
+            ""
+            "All other running processes at time of scan (review for anything unfamiliar):"
+            Get-Process | Where-Object { $_.ProcessName -notmatch 'Roblox' } |
+                Select-Object ProcessName, Id, StartTime,
+                    @{n='Path';e={ $_.Path }} |
+                Sort-Object ProcessName
+        } else {
+            "Roblox does not appear to be running right now. Run this while Roblox is open for useful results."
+        }
+    }
+
+    # 15. Unsigned / suspicious DLLs loaded into any running process
+    Save "15_suspicious_loaded_modules" {
+        "Scanning loaded modules of all accessible processes for unsigned DLLs outside system folders."
+        "This can take a minute. Access-denied processes (protected/system) are skipped automatically."
+        ""
+        $sysPaths = @("$env:WINDIR\System32", "$env:WINDIR\SysWOW64")
+        foreach ($proc in Get-Process -ErrorAction SilentlyContinue) {
+            try {
+                foreach ($mod in $proc.Modules) {
+                    $inSystemPath = $sysPaths | Where-Object { $mod.FileName -like "$_*" }
+                    if (-not $inSystemPath) {
+                        $sig = Get-AuthenticodeSignature -FilePath $mod.FileName -ErrorAction SilentlyContinue
+                        if ($sig.Status -ne 'Valid') {
+                            [PSCustomObject]@{
+                                Process    = $proc.ProcessName
+                                PID        = $proc.Id
+                                Module     = $mod.ModuleName
+                                ModulePath = $mod.FileName
+                                SigStatus  = $sig.Status
+                            }
+                        }
+                    }
+                }
+            } catch {
+                # Access denied on protected processes — expected and skipped
+            }
+        }
     }
 
     # ------------------------------------------------------------
