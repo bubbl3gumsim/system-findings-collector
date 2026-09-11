@@ -1,0 +1,267 @@
+#Requires -RunAsAdministrator
+Clear-Host
+
+$banner = @"
+    _    ____    ____  _____ ____ ___  ____  ____ ___ _   _  ____
+   / \  / ___|  |  _ \| ____/ ___/ _ \|  _ \|  _ \_ _| \ | |/ ___|
+  / _ \| |      | |_) |  _|| |  | | | | |_) | | | | ||  \| | |  _
+ / ___ \ |___   |  _ <| |__| |__| |_| |  _ <| |_| | || |\  | |_| |
+/_/   \_\____|  |_| \_\_____\____\___/|_| \_\____/___|_| \_|\____|
+
+              R  U  L  E  S
+"@
+Write-Host $banner -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Roblox Clean Reinstall + Recording Rules Enforcement" -ForegroundColor DarkGray
+Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host ""
+
+Write-Host "This will fully delete Roblox and its saved data from this PC, then download and run a fresh installer." -ForegroundColor Yellow
+Write-Host "This includes local settings/cache under the Roblox folder - it does NOT touch your Roblox account or anything saved to Roblox's servers." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "IMPORTANT:" -ForegroundColor Red
+Write-Host "This will reset your FPS cap and reset your sensitivity." -ForegroundColor Red
+Write-Host "If you want to uncap your FPS, go to C:\Users\<you>\AppData\Local\Roblox," -ForegroundColor Red
+Write-Host "open GlobalBasicSettings_13 with Notepad, and edit:" -ForegroundColor Red
+Write-Host "    <int name=`"FramerateCap`">-1</int>" -ForegroundColor Red
+Write-Host "(This is the ONLY permissible change that is allowed.)" -ForegroundColor Red
+Write-Host ""
+Write-Host "After the reinstall, you'll be asked to launch Roblox and join your game. Once you confirm" -ForegroundColor Yellow
+Write-Host "you've joined, this script will close every non-essential process on the PC (see whitelist" -ForegroundColor Yellow
+Write-Host "below) so nothing extra is running in the background during recording." -ForegroundColor Yellow
+Write-Host ""
+
+$confirm = Read-Host "Continue? (Y/N)"
+
+if ($confirm -notmatch '^[Yy]') {
+    Write-Host "Cancelled. Nothing was deleted." -ForegroundColor Cyan
+    return
+}
+
+# =========================================================================
+# STAGE 1: Clean reinstall of Roblox
+# =========================================================================
+
+# Kill any running Roblox processes and give handles time to release
+$robloxProcs = Get-Process RobloxPlayerBeta, RobloxPlayerLauncher, RobloxCrashHandler -ErrorAction SilentlyContinue
+if ($robloxProcs) {
+    Write-Host "Closing Roblox..." -ForegroundColor Cyan
+    $robloxProcs | Stop-Process -Force
+    $robloxProcs | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+} else {
+    Write-Host "Roblox is not currently running." -ForegroundColor Gray
+}
+
+# Remove the whole Roblox client folder for a clean reinstall (with retry in case a handle is still closing)
+$robloxPath = "$env:LOCALAPPDATA\Roblox"
+if (Test-Path $robloxPath) {
+    $maxAttempts = 3
+    $deleted = $false
+    for ($attempt = 1; $attempt -le $maxAttempts -and -not $deleted; $attempt++) {
+        try {
+            Remove-Item $robloxPath -Recurse -Force -ErrorAction Stop
+            $deleted = $true
+            Write-Host "Removed: $robloxPath" -ForegroundColor Green
+        } catch {
+            if ($attempt -lt $maxAttempts) {
+                Write-Host "Folder still in use, retrying in 2s... (attempt $attempt/$maxAttempts)" -ForegroundColor Yellow
+                Start-Sleep -Seconds 2
+            } else {
+                Write-Host "Could not fully delete $robloxPath : $_" -ForegroundColor Red
+                Write-Host "Try closing Roblox manually and re-running this script." -ForegroundColor Red
+            }
+        }
+    }
+} else {
+    Write-Host "Roblox folder not found at $robloxPath" -ForegroundColor Gray
+}
+
+# Send the user to the official download page and let them install it themselves
+Write-Host ""
+Write-Host "Opening the Roblox download page. Please download and run the installer yourself." -ForegroundColor Cyan
+Write-Host "This script will wait and automatically detect once the install is finished." -ForegroundColor Cyan
+Start-Process "https://www.roblox.com/download"
+
+Write-Host ""
+Write-Host "Waiting for Roblox to be installed..." -ForegroundColor Yellow
+
+$installed = $false
+$elapsedSeconds = 0
+$timeoutSeconds = 600  # give up after 10 minutes
+
+while (-not $installed -and $elapsedSeconds -lt $timeoutSeconds) {
+    Start-Sleep -Seconds 3
+    $elapsedSeconds += 3
+
+    # Detect install by either the Roblox folder reappearing with a Versions subfolder,
+    # or the Roblox process actually running
+    $folderBack = Test-Path (Join-Path $robloxPath "Versions")
+    $procRunning = Get-Process RobloxPlayerBeta, RobloxPlayerLauncher -ErrorAction SilentlyContinue
+
+    if ($folderBack -or $procRunning) {
+        $installed = $true
+    } else {
+        Write-Host "." -NoNewline -ForegroundColor DarkGray
+    }
+}
+
+Write-Host ""
+if (-not $installed) {
+    Write-Host "Didn't detect a completed install after 10 minutes." -ForegroundColor Red
+    Write-Host "If you're still installing, that's fine - just launch Roblox once manually when it's done, then re-run this script." -ForegroundColor Yellow
+    return
+}
+
+Write-Host "Roblox install detected." -ForegroundColor Green
+Write-Host ""
+Write-Host "==================================================================" -ForegroundColor Cyan
+Write-Host " Please complete all listed rec rules in the document now." -ForegroundColor Cyan
+Write-Host "==================================================================" -ForegroundColor Cyan
+Write-Host ""
+
+# =========================================================================
+# STAGE 2: Wait for the user to launch Roblox and join their game
+# =========================================================================
+
+Write-Host "Launch Roblox and join your game now." -ForegroundColor Yellow
+Read-Host "Once you have joined, press Enter here to confirm"
+
+$robloxRunning = Get-Process RobloxPlayerBeta -ErrorAction SilentlyContinue
+if (-not $robloxRunning) {
+    Write-Host "Roblox doesn't appear to be running yet." -ForegroundColor Red
+    $forceContinue = Read-Host "Continue anyway and close background processes? (Y/N)"
+    if ($forceContinue -notmatch '^[Yy]') {
+        Write-Host "Cancelled. Roblox and other processes were left alone." -ForegroundColor Cyan
+        return
+    }
+}
+
+# =========================================================================
+# STAGE 3: Close every non-essential process (leaving Roblox itself alive)
+# =========================================================================
+
+Write-Host ""
+Write-Host "=== Close Non-Essential Processes ===" -ForegroundColor Cyan
+Write-Host "This closes everything except processes required for Windows to run, your antivirus, and Roblox itself." -ForegroundColor Yellow
+Write-Host "Unsaved work in other apps WILL be lost. Save everything first." -ForegroundColor Red
+Write-Host ""
+
+# --- Core OS processes that must never be touched ---
+$systemWhitelist = @(
+    "System", "Idle", "Registry", "smss", "csrss", "wininit", "winlogon",
+    "services", "lsass", "lsm", "svchost", "dwm", "explorer", "fontdrvhost",
+    "RuntimeBroker", "sihost", "taskhostw", "ctfmon", "conhost", "dllhost",
+    "WUDFHost", "SearchIndexer", "SearchHost", "StartMenuExperienceHost",
+    "ShellExperienceHost", "ApplicationFrameHost", "TextInputHost",
+    "SecurityHealthService", "SecurityHealthSystray", "spoolsv", "audiodg",
+    "powershell", "pwsh", "WindowsTerminal", "OpenConsole", "cmd"
+)
+
+# Common antivirus / endpoint protection process names - kept alive for safety
+$avWhitelist = @(
+    "MsMpEng", "NisSrv", "SecurityHealthService", "MsSense", "SenseIR",
+    "avastui", "avastsvc", "avgui", "avgsvc", "mcshield", "mfemms",
+    "bdagent", "bdservicehost", "nortonsecurity", "ns", "ccsvchd",
+    "avp", "avpui", "malwarebytes", "mbamservice", "mbamtray"
+)
+
+# Roblox itself - the whole point of this stage is to keep the game running
+# while closing everything else, so it must never be killed here.
+$robloxWhitelist = @(
+    "RobloxPlayerBeta", "RobloxPlayerLauncher", "RobloxCrashHandler"
+)
+
+$whitelist = ($systemWhitelist + $avWhitelist + $robloxWhitelist) | ForEach-Object { $_.ToLower() }
+
+# Don't kill our own process tree
+$selfPid = $PID
+
+$candidates = Get-Process | Where-Object {
+    $_.Id -ne $selfPid -and
+    ($whitelist -notcontains $_.ProcessName.ToLower())
+}
+
+if (-not $candidates) {
+    Write-Host "Nothing to close - only whitelisted system/security/Roblox processes are running." -ForegroundColor Gray
+} else {
+    Write-Host "Found $($candidates.Count) non-essential process(es). Checking each one..." -ForegroundColor Cyan
+    Write-Host ""
+
+    $log = @()
+
+    foreach ($proc in $candidates) {
+        $path = $null
+        $signed = $null
+        $suspicious = $false
+        $reason = @()
+
+        try { $path = $proc.Path } catch { $path = $null }
+
+        if ($path) {
+            try {
+                $sig = Get-AuthenticodeSignature -FilePath $path -ErrorAction Stop
+                $signed = $sig.Status -eq "Valid"
+            } catch {
+                $signed = $false
+            }
+
+            if (-not $signed) {
+                $suspicious = $true
+                $reason += "unsigned or invalid signature"
+            }
+
+            # Processes running from Temp/Downloads/AppData pretending to be system-y names
+            if ($path -match '\\(Temp|Downloads|AppData\\Local\\Temp)\\') {
+                $suspicious = $true
+                $reason += "running from a temp/downloads folder"
+            }
+        } else {
+            $reason += "path unavailable"
+        }
+
+        $log += [PSCustomObject]@{
+            Name       = $proc.ProcessName
+            PID        = $proc.Id
+            Path       = $path
+            Signed     = $signed
+            Suspicious = $suspicious
+            Notes      = ($reason -join "; ")
+        }
+
+        try {
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            $status = "Closed"
+        } catch {
+            $status = "Failed to close: $_"
+        }
+
+        $color = if ($suspicious) { "Red" } else { "DarkGray" }
+        Write-Host ("{0,-25} PID {1,-7} {2}" -f $proc.ProcessName, $proc.Id, $status) -ForegroundColor $color
+    }
+
+    Write-Host ""
+    $suspiciousCount = ($log | Where-Object { $_.Suspicious }).Count
+    Write-Host "Done. Closed $($candidates.Count) process(es), $suspiciousCount flagged as suspicious." -ForegroundColor Green
+
+    if ($suspiciousCount -gt 0) {
+        Write-Host ""
+        Write-Host "Flagged processes (unsigned and/or running from Temp/Downloads):" -ForegroundColor Red
+        $log | Where-Object { $_.Suspicious } | ForEach-Object {
+            Write-Host "  $($_.Name) (PID $($_.PID)) - $($_.Path)" -ForegroundColor Red
+            Write-Host "    Reason: $($_.Notes)" -ForegroundColor Red
+        }
+        Write-Host ""
+        Write-Host "A flag here is not proof of anything malicious - some legitimate tools are unsigned" -ForegroundColor Yellow
+        Write-Host "or run from Temp. Treat this as a starting point for looking things up, not a verdict." -ForegroundColor Yellow
+    }
+
+    # Save full log for review
+    $logPath = Join-Path $env:TEMP "closed-processes-log.csv"
+    $log | Export-Csv -Path $logPath -NoTypeInformation
+    Write-Host ""
+    Write-Host "Full log saved to: $logPath" -ForegroundColor Gray
+}
+
+Write-Host ""
+Write-Host "All done. Roblox is reinstalled, you're joined, and background processes are cleared." -ForegroundColor Green
