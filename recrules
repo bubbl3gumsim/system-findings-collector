@@ -1,0 +1,616 @@
+#Requires -RunAsAdministrator
+Clear-Host
+
+$banner = @"
+    _    ____    ____  _____ ____ ___  ____  ____ ___ _   _  ____
+   / \  / ___|  |  _ \| ____/ ___/ _ \|  _ \|  _ \_ _| \ | |/ ___|
+  / _ \| |      | |_) |  _|| |  | | | | |_) | | | | ||  \| | |  _
+ / ___ \ |___   |  _ <| |__| |__| |_| |  _ <| |_| | || |\  | |_| |
+/_/   \_\____|  |_| \_\_____\____\___/|_| \_\____/___|_| \_|\____|
+
+              R  U  L  E  S
+"@
+Write-Host $banner -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Roblox Clean Reinstall + Recording Rules Enforcement" -ForegroundColor DarkGray
+Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host ""
+
+Write-Host "This will fully delete Roblox and its saved data from this PC, then download and run a fresh installer." -ForegroundColor Yellow
+Write-Host "This includes local settings/cache under the Roblox folder - it does NOT touch your Roblox account or anything saved to Roblox's servers." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "IMPORTANT:" -ForegroundColor Red
+Write-Host "This will reset your FPS cap and reset your sensitivity." -ForegroundColor Red
+Write-Host "If you want to uncap your FPS, go to C:\Users\<you>\AppData\Local\Roblox," -ForegroundColor Red
+Write-Host "open GlobalBasicSettings_13 with Notepad, and edit:" -ForegroundColor Red
+Write-Host "    <int name=`"FramerateCap`">-1</int>" -ForegroundColor Red
+Write-Host "(This is the ONLY permissible change that is allowed.)" -ForegroundColor Red
+Write-Host ""
+Write-Host "After the reinstall, you'll be asked to launch Roblox and join your game. Once you confirm" -ForegroundColor Yellow
+Write-Host "you've joined, this script will close every non-essential process on the PC (see whitelist" -ForegroundColor Yellow
+Write-Host "below) so nothing extra is running in the background during recording." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "IMPORTANT: MAXIMIZE this PowerShell window before choosing Y." -ForegroundColor Magenta
+Write-Host "Keep PowerShell maximized for the entire process." -ForegroundColor Magenta
+Write-Host ""
+
+$confirm = Read-Host "Continue? (Y/N)"
+
+if ($confirm -notmatch '^[Yy]') {
+    Write-Host "Cancelled. Nothing was deleted." -ForegroundColor Cyan
+    return
+}
+
+# =========================================================================
+# STAGE 1: Clean reinstall of Roblox
+# =========================================================================
+
+# Kill any running Roblox processes and give handles time to release
+$robloxProcs = Get-Process RobloxPlayerBeta, RobloxPlayerLauncher, RobloxCrashHandler -ErrorAction SilentlyContinue
+if ($robloxProcs) {
+    Write-Host "Closing Roblox..." -ForegroundColor Cyan
+    $robloxProcs | Stop-Process -Force
+    $robloxProcs | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+} else {
+    Write-Host "Roblox is not currently running." -ForegroundColor Gray
+}
+
+# Remove the whole Roblox client folder for a clean reinstall (with retry in case a handle is still closing)
+$robloxPath = "$env:LOCALAPPDATA\Roblox"
+if (Test-Path $robloxPath) {
+    $maxAttempts = 3
+    $deleted = $false
+    for ($attempt = 1; $attempt -le $maxAttempts -and -not $deleted; $attempt++) {
+        try {
+            Remove-Item $robloxPath -Recurse -Force -ErrorAction Stop
+            $deleted = $true
+            Write-Host "Removed: $robloxPath" -ForegroundColor Green
+        } catch {
+            if ($attempt -lt $maxAttempts) {
+                Write-Host "Folder still in use, retrying in 2s... (attempt $attempt/$maxAttempts)" -ForegroundColor Yellow
+                Start-Sleep -Seconds 2
+            } else {
+                Write-Host "Could not fully delete $robloxPath : $_" -ForegroundColor Red
+                Write-Host "Try closing Roblox manually and re-running this script." -ForegroundColor Red
+            }
+        }
+    }
+} else {
+    Write-Host "Roblox folder not found at $robloxPath" -ForegroundColor Gray
+}
+
+# Send the user to the official download page and let them install it themselves
+Write-Host ""
+Write-Host "Opening the Roblox download page. Please download and run the installer yourself." -ForegroundColor Cyan
+Write-Host "This script will wait and automatically detect once the install is finished." -ForegroundColor Cyan
+Start-Process "https://www.roblox.com/download"
+
+Write-Host ""
+Write-Host "Waiting for Roblox to be installed..." -ForegroundColor Yellow
+
+$installed = $false
+$elapsedSeconds = 0
+$timeoutSeconds = 600  # give up after 10 minutes
+
+while (-not $installed -and $elapsedSeconds -lt $timeoutSeconds) {
+    Start-Sleep -Seconds 3
+    $elapsedSeconds += 3
+
+    # Detect install by either the Roblox folder reappearing with a Versions subfolder,
+    # or the Roblox process actually running
+    $folderBack = Test-Path (Join-Path $robloxPath "Versions")
+    $procRunning = Get-Process RobloxPlayerBeta, RobloxPlayerLauncher -ErrorAction SilentlyContinue
+
+    if ($folderBack -or $procRunning) {
+        $installed = $true
+    } else {
+        Write-Host "." -NoNewline -ForegroundColor DarkGray
+    }
+}
+
+Write-Host ""
+if (-not $installed) {
+    Write-Host "Didn't detect a completed install after 10 minutes." -ForegroundColor Red
+    Write-Host "If you're still installing, that's fine - just launch Roblox once manually when it's done, then re-run this script." -ForegroundColor Yellow
+    return
+}
+
+Write-Host "Roblox install detected." -ForegroundColor Green
+Write-Host ""
+Write-Host "==============================================================================================" -ForegroundColor Cyan
+Write-Host " Please complete all listed recording rules in the Before Joining section of the document now." -ForegroundColor Cyan
+Write-Host "==============================================================================================" -ForegroundColor Cyan
+Write-Host ""
+
+# =========================================================================
+# STAGE 2: Wait for the user to launch Roblox and join their game
+# =========================================================================
+
+Write-Host "Launch Roblox and join your game now." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "=== Recording Level Rules ===" -ForegroundColor Magenta
+Write-Host "L3: You are NOT allowed to open ANYTHING after this point." -ForegroundColor Red
+Write-Host "L2: You may ONLY have Discord open. Do not open anything else." -ForegroundColor Yellow
+Write-Host "Follow the level you were assigned before pressing Enter." -ForegroundColor White
+Write-Host ""
+Read-Host "Once you have joined and followed the rules above, press Enter to continue"
+
+$robloxRunning = Get-Process RobloxPlayerBeta -ErrorAction SilentlyContinue
+if (-not $robloxRunning) {
+    Write-Host "Roblox doesn't appear to be running yet." -ForegroundColor Red
+    $forceContinue = Read-Host "Continue anyway and close background processes? (Y/N)"
+    if ($forceContinue -notmatch '^[Yy]') {
+        Write-Host "Cancelled. Roblox and other processes were left alone." -ForegroundColor Cyan
+        return
+    }
+}
+
+# =========================================================================
+# STAGE 3: Close every non-essential process (leaving Roblox itself alive)
+# =========================================================================
+
+Write-Host ""
+Write-Host "╔══════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor DarkCyan
+Write-Host "║                    CLOSE NON-ESSENTIAL PROCESSES                            ║" -ForegroundColor Cyan
+Write-Host "╚══════════════════════════════════════════════════════════════════════════════╝" -ForegroundColor DarkCyan
+Write-Host "This closes EVERYTHING except the core Windows processes needed to keep the OS running, plus Roblox itself." -ForegroundColor Yellow
+Write-Host "That includes antivirus/security tray tools, background apps, and anything else - no exceptions beyond the list below." -ForegroundColor DarkYellow
+Write-Host "Unsaved work in other apps WILL be lost. Save everything first." -ForegroundColor Red
+Write-Host "Press Enter above only after you have finished saving work and followed the L2/L3 rules." -ForegroundColor Magenta
+Write-Host ""
+
+# --- Core OS processes that must never be touched ---
+# This is now the ONLY whitelist besides Roblox - nothing else is spared.
+$systemWhitelist = @(
+    "System", "Idle", "Registry", "smss", "csrss", "wininit", "winlogon",
+    "services", "lsass", "lsm", "svchost", "dwm", "explorer", "fontdrvhost",
+    "RuntimeBroker", "sihost", "taskhostw", "ctfmon", "conhost", "dllhost",
+    "WUDFHost", "SearchIndexer", "SearchHost", "StartMenuExperienceHost",
+    "ShellExperienceHost", "ApplicationFrameHost", "TextInputHost",
+    "spoolsv", "audiodg",
+    "powershell", "pwsh", "WindowsTerminal", "OpenConsole", "cmd"
+)
+
+# Roblox itself - the whole point of this stage is to keep the game running
+# while closing everything else, so it must never be killed here.
+$robloxWhitelist = @(
+    "RobloxPlayerBeta", "RobloxPlayerLauncher", "RobloxCrashHandler"
+)
+
+# Recording software whitelist.
+# Only the capture components are allowed; unrelated vendor utilities remain
+# candidates for closure.
+$recordingWhitelist = @()
+$gpuNames = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+$hasAMD = $gpuNames -match 'AMD|Radeon'
+$hasNVIDIA = $gpuNames -match 'NVIDIA|GeForce'
+$hasIntel = $gpuNames -match 'Intel'
+
+if ($hasAMD) {
+    $recordingWhitelist += @("RadeonSoftware", "AMDRSServ", "AMDRSSrcExt")
+}
+if ($hasNVIDIA) {
+    $recordingWhitelist += @("NVIDIA Share", "nvcontainer")
+}
+if ($hasIntel) {
+    $recordingWhitelist += @("obs64", "obs32", "obs-browser-page", "obs-ffmpeg-mux", "obs-ffmpeg-mux32")
+}
+
+$whitelist = ($systemWhitelist + $robloxWhitelist + $recordingWhitelist) |
+    ForEach-Object { $_.ToLower() } | Select-Object -Unique
+
+Write-Host "Recording whitelist:" -ForegroundColor Magenta
+if ($hasAMD) { Write-Host "  AMD -> Adrenalin Record & Stream capture components" -ForegroundColor DarkYellow }
+if ($hasNVIDIA) { Write-Host "  NVIDIA -> ShadowPlay capture components" -ForegroundColor Green }
+if ($hasIntel) { Write-Host "  Intel -> OBS components" -ForegroundColor Cyan }
+Write-Host "Only listed recorder components are spared; other vendor apps are still closed." -ForegroundColor Gray
+Write-Host ""
+
+# Don't kill our own process tree
+$selfPid = $PID
+
+$candidates = Get-Process | Where-Object {
+    $_.Id -ne $selfPid -and
+    ($whitelist -notcontains $_.ProcessName.ToLower())
+}
+
+if (-not $candidates) {
+    Write-Host "Nothing to close - only whitelisted system/security/Roblox processes are running." -ForegroundColor Gray
+} else {
+    Write-Host "Found $($candidates.Count) non-essential process(es). Checking each one..." -ForegroundColor Cyan
+    Write-Host ""
+
+    $log = @()
+
+    foreach ($proc in $candidates) {
+        $path = $null
+        $signed = $null
+        $suspicious = $false
+        $reason = @()
+
+        try { $path = $proc.Path } catch { $path = $null }
+
+        if ($path) {
+            try {
+                $sig = Get-AuthenticodeSignature -FilePath $path -ErrorAction Stop
+                $signed = $sig.Status -eq "Valid"
+            } catch {
+                $signed = $false
+            }
+
+            if (-not $signed) {
+                $suspicious = $true
+                $reason += "unsigned or invalid signature"
+            }
+
+            # Processes running from Temp/Downloads/AppData pretending to be system-y names
+            if ($path -match '\\(Temp|Downloads|AppData\\Local\\Temp)\\') {
+                $suspicious = $true
+                $reason += "running from a temp/downloads folder"
+            }
+        } else {
+            $reason += "path unavailable"
+        }
+
+        $log += [PSCustomObject]@{
+            Name       = $proc.ProcessName
+            PID        = $proc.Id
+            Path       = $path
+            Signed     = $signed
+            Suspicious = $suspicious
+            Notes      = ($reason -join "; ")
+        }
+
+        try {
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            $status = "Closed"
+        } catch {
+            # If normal process termination fails, check whether this PID belongs
+            # to a Windows service. This applies to ANY service, not just warp-svc.
+            try {
+                $servicesForPid = Get-CimInstance Win32_Service -Filter "ProcessId = $($proc.Id)" -ErrorAction Stop
+
+                if ($servicesForPid) {
+                    $stoppedServiceNames = @()
+
+                    foreach ($svc in $servicesForPid) {
+                        try {
+                            $service = Get-Service -Name $svc.Name -ErrorAction Stop
+
+                            if ($service.Status -ne "Stopped") {
+                                Stop-Service -Name $svc.Name -Force -ErrorAction Stop
+                                $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(10))
+                            }
+
+                            $stoppedServiceNames += $svc.Name
+                        } catch {
+                            # Keep trying other services attached to this PID.
+                        }
+                    }
+
+                    Start-Sleep -Milliseconds 500
+
+                    if (-not (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue)) {
+                        if ($stoppedServiceNames.Count -gt 0) {
+                            $status = "Closed (service stopped: $($stoppedServiceNames -join ', '))"
+                        } else {
+                            $status = "Service found, but could not be stopped"
+                        }
+                    } else {
+                        # Service stop succeeded but the hosting process is still alive.
+                        # Try normal taskkill, without attempting to bypass protection.
+                        try {
+                            $tkOut = & taskkill /F /PID $proc.Id 2>&1
+                            if ($LASTEXITCODE -eq 0) {
+                                $status = "Closed (service stopped + taskkill)"
+                            } else {
+                                $status = "Failed to close: $tkOut"
+                            }
+                        } catch {
+                            $status = "Failed to close: $($_.Exception.Message)"
+                        }
+                    }
+                } else {
+                    # Not a service: use the normal taskkill fallback.
+                    try {
+                        $tkOut = & taskkill /F /PID $proc.Id 2>&1
+                        if ($LASTEXITCODE -eq 0) {
+                            $status = "Closed (via taskkill fallback)"
+                        } else {
+                            $status = "Failed to close: $tkOut"
+                        }
+                    } catch {
+                        $status = "Failed to close: $($_.Exception.Message)"
+                    }
+                }
+            } catch {
+                $status = "Failed to close: $($_.Exception.Message)"
+            }
+        }
+
+        if ($suspicious) {
+            $color = "Red"
+        } elseif ($status -like "Closed*") {
+            $color = "Green"
+        } elseif ($status -like "Failed*") {
+            $color = "DarkYellow"
+        } else {
+            $color = "Gray"
+        }
+        Write-Host ("{0,-25} PID {1,-7} {2}" -f $proc.ProcessName, $proc.Id, $status) -ForegroundColor $color
+    }
+
+    Write-Host ""
+    $suspiciousCount = ($log | Where-Object { $_.Suspicious }).Count
+    Write-Host "Done. Closed $($candidates.Count) process(es), $suspiciousCount flagged as suspicious." -ForegroundColor Green
+
+    if ($suspiciousCount -gt 0) {
+        Write-Host ""
+        Write-Host "Flagged processes (unsigned and/or running from Temp/Downloads):" -ForegroundColor Red
+        $log | Where-Object { $_.Suspicious } | ForEach-Object {
+            Write-Host "  $($_.Name) (PID $($_.PID)) - $($_.Path)" -ForegroundColor Red
+            Write-Host "    Reason: $($_.Notes)" -ForegroundColor Red
+        }
+        Write-Host ""
+        Write-Host "A flag here is not proof of anything malicious - some legitimate tools are unsigned" -ForegroundColor Yellow
+        Write-Host "or run from Temp. Treat this as a starting point for looking things up, not a verdict." -ForegroundColor Yellow
+    }
+
+    # Save full log for review
+    $logDir = "C:\Users\ayat0\OneDrive\Desktop\AC-FINDINGS"
+    if (-not (Test-Path $logDir)) {
+        New-Item -Path $logDir -ItemType Directory -Force | Out-Null
+    }
+    $logPath = Join-Path $logDir "log-58598257.csv"
+    $log | Export-Csv -Path $logPath -NoTypeInformation
+    Write-Host ""
+    Write-Host "Full log saved to: $logPath" -ForegroundColor Gray
+}
+
+Write-Host ""
+Write-Host "=== Automatic Findings Collection ===" -ForegroundColor DarkCyan
+Write-Host "Cleanup is complete. Starting the integrated findings collector..." -ForegroundColor Cyan
+Write-Host ""
+
+$collector = {
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $stamp   = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+    $temp    = Join-Path $env:TEMP "findings_$stamp"
+    New-Item -ItemType Directory -Path $temp -Force | Out-Null
+
+    function Save($name, $scriptblock) {
+        $path = Join-Path $temp "$name.txt"
+        try {
+            (& $scriptblock) | Out-String -Width 300 | Set-Content -Path $path -Encoding UTF8
+        } catch {
+            "ERROR: $_" | Set-Content -Path $path -Encoding UTF8
+        }
+    }
+
+    # 1. Process list with parentage + file size
+    Save "01_process_parentage" {
+        # Build PID -> Name map once instead of calling Get-Process per row
+        $parentMap = @{}
+        Get-Process | ForEach-Object { $parentMap[$_.Id] = $_.Name }
+
+        Get-CimInstance Win32_Process | Select-Object Name, ProcessId,
+            @{n='ParentName';e={
+                if ($parentMap.ContainsKey([int]$_.ParentProcessId)) { $parentMap[[int]$_.ParentProcessId] } else { $null }
+            }},
+            @{n='SizeMB';e={
+                if ($_.ExecutablePath -and (Test-Path $_.ExecutablePath)) {
+                    [math]::Round((Get-Item $_.ExecutablePath -ErrorAction SilentlyContinue).Length / 1MB, 2)
+                } else { $null }
+            }},
+            CommandLine
+    }
+
+    # 2. Virtualization / systeminfo
+    Save "02_systeminfo_virtualization" {
+        systeminfo | findstr /i "hyper os version page virtualization"
+    }
+
+    # 3. Scheduled tasks
+    Save "03_scheduled_tasks" { Get-ScheduledTask }
+
+    # 4. Tasklist
+    Save "04_tasklist" { tasklist }
+
+    # 5. Process start times
+    Save "05_process_starttimes" {
+        Get-Process | Select-Object Name, StartTime -ErrorAction SilentlyContinue
+    }
+
+    # 6. Running services
+    Save "06_running_services" {
+        Get-Service | Where-Object { $_.Status -eq 'Running' } | Select-Object Name, DisplayName, Status
+    }
+
+    # 7. Unsigned exes in Program Files (with size + hash)
+    $pfPaths = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) |
+        Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+    $pfFiles = Get-ChildItem -Path $pfPaths -Recurse -Include *.exe -ErrorAction SilentlyContinue
+
+    # Size map built up front so we don't hit disk again per file later
+    $sizeMap = @{}
+    foreach ($f in $pfFiles) { $sizeMap[$f.FullName] = $f.Length }
+
+    $unsigned = $pfFiles | Get-AuthenticodeSignature |
+        Where-Object { $_.Status -ne 'Valid' } |
+        Select-Object Path, Status,
+            @{n='SizeMB';e={ if ($sizeMap.ContainsKey($_.Path)) { [math]::Round($sizeMap[$_.Path] / 1MB, 2) } else { $null } }}
+
+    Save "07_unsigned_program_files_exes" { $unsigned }
+
+    Save "07b_unsigned_exe_hashes" {
+        foreach ($i in $unsigned) {
+            "-- $($i.Path) (Size: $($i.SizeMB) MB) --"
+            try { certutil -hashfile "$($i.Path)" SHA256 } catch { "Could not hash: $_" }
+            ""
+        }
+        "NOTE: VirusTotal check is manual — upload each flagged file at virustotal.com"
+        "and record the detection ratio (e.g. 3/71) and detection names here."
+    }
+
+    # 8. Root certificates
+    Save "08_root_certificates" {
+        Get-ChildItem Cert:\LocalMachine\Root | Select-Object Subject, Thumbprint, NotBefore | Sort-Object NotBefore -Descending
+    }
+
+    # 9. collect_report.ps1 notice
+    Save "09_collect_report_notice" {
+        "This step calls an external script (.\collect_report.ps1) whose contents were not provided,"
+        "so it has not been bundled or run here. Read any unknown script before running it."
+    }
+
+    # 10. Prefetch files (summary, sizes included)
+    Save "10_prefetch_files" {
+        Get-ChildItem "$env:WINDIR\Prefetch" -Filter *.pf -ErrorAction SilentlyContinue |
+            Select-Object Name,
+                @{n='SizeKB';e={[math]::Round($_.Length / 1KB, 2)}},
+                CreationTime, LastWriteTime, LastAccessTime |
+            Sort-Object LastWriteTime -Descending
+    }
+
+    # 11. Recent items (shell:recent), sizes included
+    Save "11_recent_items" {
+        $recentPath = "$env:APPDATA\Microsoft\Windows\Recent"
+        Get-ChildItem $recentPath -ErrorAction SilentlyContinue |
+            Select-Object Name,
+                @{n='SizeKB';e={[math]::Round($_.Length / 1KB, 2)}},
+                CreationTime, LastWriteTime |
+            Sort-Object LastWriteTime -Descending
+    }
+
+    # 12. Recent items resolved targets (lnk size + target size)
+    Save "12_recent_items_targets" {
+        $sh = New-Object -ComObject WScript.Shell
+        Get-ChildItem "$env:APPDATA\Microsoft\Windows\Recent" -Filter *.lnk -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                try {
+                    $lnk = $sh.CreateShortcut($_.FullName)
+                    $targetSizeKB = $null
+                    if ($lnk.TargetPath -and (Test-Path $lnk.TargetPath)) {
+                        $targetSizeKB = [math]::Round((Get-Item $lnk.TargetPath -ErrorAction SilentlyContinue).Length / 1KB, 2)
+                    }
+                    [PSCustomObject]@{
+                        Name          = $_.Name
+                        Target        = $lnk.TargetPath
+                        Arguments     = $lnk.Arguments
+                        LnkSizeKB     = [math]::Round($_.Length / 1KB, 2)
+                        TargetSizeKB  = $targetSizeKB
+                        LastWriteTime = $_.LastWriteTime
+                    }
+                } catch {
+                    [PSCustomObject]@{
+                        Name = $_.Name; Target = "ERROR"; Arguments = ""
+                        LnkSizeKB = $null; TargetSizeKB = $null; LastWriteTime = $_.LastWriteTime
+                    }
+                }
+            }
+    }
+
+    # ------------------------------------------------------------
+    # Raw artifact copies -> logs\Prefetch, logs\Recent, logs\EventLogs
+    # ------------------------------------------------------------
+    $logsRoot = Join-Path $temp "logs"
+    New-Item -ItemType Directory -Path $logsRoot -Force | Out-Null
+
+    function Copy-Artifact($label, $source, $destSubfolder) {
+        $dest = Join-Path $logsRoot $destSubfolder
+        try {
+            if (Test-Path $source) {
+                New-Item -ItemType Directory -Path $dest -Force | Out-Null
+                Copy-Item -Path (Join-Path $source '*') -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+                $copied  = Get-ChildItem $dest -Recurse -File -ErrorAction SilentlyContinue
+                $count   = $copied.Count
+                $sizeMB  = [math]::Round((($copied | Measure-Object Length -Sum).Sum) / 1MB, 2)
+                "OK   [$label] $count files, $sizeMB MB copied from '$source' -> logs\$destSubfolder"
+            } else {
+                "SKIP [$label] source not found: $source"
+            }
+        } catch {
+            "FAIL [$label] error copying from '$source': $_"
+        }
+    }
+
+    $copyLog = @()
+    $copyLog += Copy-Artifact "Prefetch"          "$env:WINDIR\Prefetch"                     "Prefetch"
+    $copyLog += Copy-Artifact "Recent items"      "$env:APPDATA\Microsoft\Windows\Recent"     "Recent"
+    $copyLog += Copy-Artifact "Windows Event Logs" "$env:WINDIR\System32\winevt\Logs"         "EventLogs"
+    $copyLog | Set-Content -Path (Join-Path $temp "13_raw_artifact_copy_log.txt") -Encoding UTF8
+
+    # ------------------------------------------------------------
+    # Zip everything up into Desktop\AC-FINDINGS\FINDINGS-<stamp>.zip
+    # Using System.IO.Compression directly - noticeably faster than
+    # Compress-Archive once Prefetch + Event Logs are in the mix.
+    # ------------------------------------------------------------
+    $acFolder = Join-Path $desktop "AC-FINDINGS"
+    New-Item -ItemType Directory -Path $acFolder -Force | Out-Null
+
+    $zipPath = Join-Path $acFolder "FINDINGS-$stamp.zip"
+    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $temp, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+
+    Remove-Item $temp -Recurse -Force
+
+    return $zipPath
+}
+
+# ============================================================
+# Run collector as background job, animate spinner while waiting
+# ============================================================
+$job = Start-Job -ScriptBlock $collector
+
+$spinner = @('|','/','-','\')
+$i = 0
+while ($job.State -eq 'Running') {
+    Write-Host -NoNewline ("`r  Loading findings... $($spinner[$i % $spinner.Length])  ")
+    Start-Sleep -Milliseconds 150
+    $i++
+}
+
+Write-Host -NoNewline "`r"
+
+if ($job.State -eq 'Failed') {
+    Write-Host "  Collection FAILED.                  " -ForegroundColor Red
+    Write-Host ""
+    Receive-Job -Job $job -ErrorAction SilentlyContinue 2>&1 | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    Remove-Job -Job $job
+    return
+}
+
+$zipPath = Receive-Job -Job $job
+Remove-Job -Job $job
+
+$zipSizeMB = if (Test-Path $zipPath) { [math]::Round((Get-Item $zipPath).Length / 1MB, 2) } else { $null }
+
+Write-Host "  Loading findings... done!          " -ForegroundColor Green
+Write-Host ""
+Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host "  Output saved to:" -ForegroundColor White
+Write-Host "  $zipPath" -ForegroundColor Yellow
+if ($zipSizeMB) {
+    Write-Host "  Size: $zipSizeMB MB" -ForegroundColor Yellow
+}
+Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host ""
+Write-Host "=== TASK MANAGER CHECK ===" -ForegroundColor Magenta
+Write-Host "Before playing, SHOW Task Manager with ALL of the following:" -ForegroundColor Yellow
+Write-Host "1. Right-click Name and enable Process Name and Command Line." -ForegroundColor White
+Write-Host "2. Expand Command Line until Memory Usage reaches the right edge." -ForegroundColor White
+Write-Host "3. Click View and then Expand All (3 dots, top right)." -ForegroundColor White
+Write-Host "4. Scroll to the VERY BOTTOM and ensure EVERY process is visible." -ForegroundColor White
+Write-Host ""
+Write-Host "Do NOT play until Task Manager is configured and visible." -ForegroundColor Red
+Read-Host "Once Task Manager is shown correctly, press Enter to continue"
+
+Write-Host ""
+Write-Host "All done. Roblox is reinstalled, background processes are cleared, findings were collected, and Task Manager has been shown." -ForegroundColor Green
+Write-Host "You may now play your Matches." -ForegroundColor Green
