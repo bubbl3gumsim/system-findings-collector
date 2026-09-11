@@ -1,0 +1,122 @@
+#Requires -RunAsAdministrator
+Clear-Host
+
+Write-Host "=== Close Non-Essential Processes ===" -ForegroundColor Cyan
+Write-Host "This closes everything except processes required for Windows to run and your antivirus." -ForegroundColor Yellow
+Write-Host "Unsaved work in other apps WILL be lost. Save everything first." -ForegroundColor Red
+Write-Host ""
+
+# --- Core OS processes that must never be touched ---
+# Names only, case-insensitive, no extension
+$systemWhitelist = @(
+    "System", "Idle", "Registry", "smss", "csrss", "wininit", "winlogon",
+    "services", "lsass", "lsm", "svchost", "RobloxCrashHandler", "RobloxPlayerBeta", "dwm", "explorer", "fontdrvhost",
+    "RuntimeBroker", "sihost", "taskhostw", "ctfmon", "conhost", "dllhost",
+    "WUDFHost", "SearchIndexer", "SearchHost", "StartMenuExperienceHost",
+    "ShellExperienceHost", "ApplicationFrameHost", "TextInputHost",
+    "SecurityHealthService", "SecurityHealthSystray", "spoolsv", "audiodg",
+    "powershell", "pwsh", "WindowsTerminal", "OpenConsole", "cmd"
+)
+
+# Common antivirus / endpoint protection process names - kept alive for safety
+# regardless of "no exceptions", because killing security software is not something
+# this script will do.
+$avWhitelist = @(
+    "MsMpEng", "NisSrv", "SecurityHealthService", "MsSense", "SenseIR",
+    "avastui", "avastsvc", "avgui", "avgsvc", "mcshield", "mfemms",
+    "bdagent", "bdservicehost", "nortonsecurity", "ns", "ccsvchd",
+    "avp", "avpui", "malwarebytes", "mbamservice", "mbamtray"
+)
+
+$whitelist = ($systemWhitelist + $avWhitelist) | ForEach-Object { $_.ToLower() }
+
+# Don't kill our own process tree
+$selfPid = $PID
+
+$candidates = Get-Process | Where-Object {
+    $_.Id -ne $selfPid -and
+    ($whitelist -notcontains $_.ProcessName.ToLower())
+}
+
+if (-not $candidates) {
+    Write-Host "Nothing to close - only whitelisted system/security processes are running." -ForegroundColor Gray
+    return
+}
+
+Write-Host "Found $($candidates.Count) non-essential process(es). Checking each one..." -ForegroundColor Cyan
+Write-Host ""
+
+$log = @()
+
+foreach ($proc in $candidates) {
+    $path = $null
+    $signed = $null
+    $suspicious = $false
+    $reason = @()
+
+    try { $path = $proc.Path } catch { $path = $null }
+
+    if ($path) {
+        try {
+            $sig = Get-AuthenticodeSignature -FilePath $path -ErrorAction Stop
+            $signed = $sig.Status -eq "Valid"
+        } catch {
+            $signed = $false
+        }
+
+        if (-not $signed) {
+            $suspicious = $true
+            $reason += "unsigned or invalid signature"
+        }
+
+        # Processes running from Temp/Downloads/AppData pretending to be system-y names
+        if ($path -match '\\(Temp|Downloads|AppData\\Local\\Temp)\\') {
+            $suspicious = $true
+            $reason += "running from a temp/downloads folder"
+        }
+    } else {
+        # Couldn't get a path at all (often protected/system-owned) - note it, don't flag as suspicious by itself
+        $reason += "path unavailable"
+    }
+
+    $log += [PSCustomObject]@{
+        Name       = $proc.ProcessName
+        PID        = $proc.Id
+        Path       = $path
+        Signed     = $signed
+        Suspicious = $suspicious
+        Notes      = ($reason -join "; ")
+    }
+
+    try {
+        Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+        $status = "Closed"
+    } catch {
+        $status = "Failed to close: $_"
+    }
+
+    $color = if ($suspicious) { "Red" } else { "DarkGray" }
+    Write-Host ("{0,-25} PID {1,-7} {2}" -f $proc.ProcessName, $proc.Id, $status) -ForegroundColor $color
+}
+
+Write-Host ""
+$suspiciousCount = ($log | Where-Object { $_.Suspicious }).Count
+Write-Host "Done. Closed $($candidates.Count) process(es), $suspiciousCount flagged as suspicious." -ForegroundColor Green
+
+if ($suspiciousCount -gt 0) {
+    Write-Host ""
+    Write-Host "Flagged processes (unsigned and/or running from Temp/Downloads):" -ForegroundColor Red
+    $log | Where-Object { $_.Suspicious } | ForEach-Object {
+        Write-Host "  $($_.Name) (PID $($_.PID)) - $($_.Path)" -ForegroundColor Red
+        Write-Host "    Reason: $($_.Notes)" -ForegroundColor Red
+    }
+    Write-Host ""
+    Write-Host "A flag here is not proof of anything malicious - some legitimate tools are unsigned" -ForegroundColor Yellow
+    Write-Host "or run from Temp. Treat this as a starting point for looking things up, not a verdict." -ForegroundColor Yellow
+}
+
+# Save full log for review
+$logPath = Join-Path $env:TEMP "closed-processes-log.csv"
+$log | Export-Csv -Path $logPath -NoTypeInformation
+Write-Host ""
+Write-Host "Full log saved to: $logPath" -ForegroundColor Gray
