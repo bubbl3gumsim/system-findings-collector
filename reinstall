@@ -9,7 +9,7 @@ $banner = @"
 
               R  U  L  E  S
 "@
-Write-Host $banner -ForegroundColor Red
+Write-Host $banner -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Roblox Clean Reinstall" -ForegroundColor DarkGray
 Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
@@ -17,6 +17,15 @@ Write-Host ""
 
 Write-Host "This will fully delete Roblox and its saved data from this PC, then download and run a fresh installer." -ForegroundColor Yellow
 Write-Host "This includes local settings/cache under the Roblox folder - it does NOT touch your Roblox account or anything saved to Roblox's servers." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "IMPORTANT:" -ForegroundColor Red
+Write-Host "This will reset your FPS cap and reset your sensitivity." -ForegroundColor Red
+Write-Host "If you want to uncap your FPS, go to C:\Users\<you>\AppData\Local\Roblox," -ForegroundColor Red
+Write-Host "open GlobalBasicSettings_13 with Notepad, and edit:" -ForegroundColor Red
+Write-Host "    <int name=`"FramerateCap`">-1</int>" -ForegroundColor Red
+Write-Host "(This is the ONLY permissible change that is allowed.)" -ForegroundColor Red
+Write-Host ""
+
 $confirm = Read-Host "Continue? (Y/N)"
 
 if ($confirm -notmatch '^[Yy]') {
