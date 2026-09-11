@@ -9,7 +9,7 @@ $banner = @"
 
               R  U  L  E  S
 "@
-Write-Host $banner -ForegroundColor Cyan
+Write-Host $banner -ForegroundColor Red
 Write-Host ""
 Write-Host "  Roblox Clean Reinstall" -ForegroundColor DarkGray
 Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
@@ -24,14 +24,37 @@ if ($confirm -notmatch '^[Yy]') {
     return
 }
 
-# Kill any running Roblox processes
-Get-Process RobloxPlayerBeta, RobloxPlayerLauncher, RobloxCrashHandler -ErrorAction SilentlyContinue | Stop-Process -Force
+# Kill any running Roblox processes and give handles time to release
+$robloxProcs = Get-Process RobloxPlayerBeta, RobloxPlayerLauncher, RobloxCrashHandler -ErrorAction SilentlyContinue
+if ($robloxProcs) {
+    Write-Host "Closing Roblox..." -ForegroundColor Cyan
+    $robloxProcs | Stop-Process -Force
+    $robloxProcs | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+} else {
+    Write-Host "Roblox is not currently running." -ForegroundColor Gray
+}
 
-# Remove the whole Roblox client folder for a clean reinstall
+# Remove the whole Roblox client folder for a clean reinstall (with retry in case a handle is still closing)
 $robloxPath = "$env:LOCALAPPDATA\Roblox"
 if (Test-Path $robloxPath) {
-    Remove-Item $robloxPath -Recurse -Force
-    Write-Host "Removed: $robloxPath" -ForegroundColor Green
+    $maxAttempts = 3
+    $deleted = $false
+    for ($attempt = 1; $attempt -le $maxAttempts -and -not $deleted; $attempt++) {
+        try {
+            Remove-Item $robloxPath -Recurse -Force -ErrorAction Stop
+            $deleted = $true
+            Write-Host "Removed: $robloxPath" -ForegroundColor Green
+        } catch {
+            if ($attempt -lt $maxAttempts) {
+                Write-Host "Folder still in use, retrying in 2s... (attempt $attempt/$maxAttempts)" -ForegroundColor Yellow
+                Start-Sleep -Seconds 2
+            } else {
+                Write-Host "Could not fully delete $robloxPath : $_" -ForegroundColor Red
+                Write-Host "Try closing Roblox manually and re-running this script." -ForegroundColor Red
+            }
+        }
+    }
 } else {
     Write-Host "Roblox folder not found at $robloxPath" -ForegroundColor Gray
 }
