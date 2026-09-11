@@ -1,0 +1,54 @@
+Clear-Host
+
+$banner = @"
+    _    ____    ____  _____ ____ ___  ____  ____ ___ _   _  ____
+   / \  / ___|  |  _ \| ____/ ___/ _ \|  _ \|  _ \_ _| \ | |/ ___|
+  / _ \| |      | |_) |  _|| |  | | | | |_) | | | | ||  \| | |  _
+ / ___ \ |___   |  _ <| |__| |__| |_| |  _ <| |_| | || |\  | |_| |
+/_/   \_\____|  |_| \_\_____\____\___/|_| \_\____/___|_| \_|\____|
+
+              R  U  L  E  S
+"@
+Write-Host $banner -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Roblox Clean Reinstall" -ForegroundColor DarkGray
+Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host ""
+
+Write-Host "This will fully delete Roblox and its saved data from this PC, then download and run a fresh installer." -ForegroundColor Yellow
+Write-Host "This includes local settings/cache under the Roblox folder - it does NOT touch your Roblox account or anything saved to Roblox's servers." -ForegroundColor Yellow
+$confirm = Read-Host "Continue? (Y/N)"
+
+if ($confirm -notmatch '^[Yy]') {
+    Write-Host "Cancelled. Nothing was deleted." -ForegroundColor Cyan
+    return
+}
+
+# Kill any running Roblox processes
+Get-Process RobloxPlayerBeta, RobloxPlayerLauncher, RobloxCrashHandler -ErrorAction SilentlyContinue | Stop-Process -Force
+
+# Remove the whole Roblox client folder for a clean reinstall
+$robloxPath = "$env:LOCALAPPDATA\Roblox"
+if (Test-Path $robloxPath) {
+    Remove-Item $robloxPath -Recurse -Force
+    Write-Host "Removed: $robloxPath" -ForegroundColor Green
+} else {
+    Write-Host "Roblox folder not found at $robloxPath" -ForegroundColor Gray
+}
+
+# Download the installer directly (instead of opening a browser tab)
+$installerUrl = "https://www.roblox.com/download/client?os=win&renderingPlatform=nextjs"
+$installerPath = Join-Path $env:TEMP "RobloxPlayerInstaller.exe"
+
+Write-Host "Downloading installer..." -ForegroundColor Cyan
+try {
+    Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
+    Write-Host "Downloaded to: $installerPath" -ForegroundColor Green
+
+    Write-Host "Launching installer..." -ForegroundColor Cyan
+    Start-Process -FilePath $installerPath
+} catch {
+    Write-Host "Download failed: $_" -ForegroundColor Red
+    Write-Host "Falling back to opening the download page in your browser." -ForegroundColor Yellow
+    Start-Process "https://www.roblox.com/download"
+}
