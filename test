@@ -780,3 +780,86 @@ function Invoke-FindingsCollector {
     Write-Host "ZIP size: $zipSizeMB MB" -ForegroundColor Green
 }
 
+
+# =========================================================================
+# RUN / MAIN ORCHESTRATION
+# =========================================================================
+Section "Prerequisites"
+Write-Host "Confirm: correct resolution/fps/bitrate, correct capture software, single monitor, taskbar visible." -ForegroundColor $theme.Accent
+if ($tier -eq '3') {
+    Write-Host "Tier 3: start phone recording BEFORE powering on, landscape, all peripherals visible." -ForegroundColor Red
+}
+Pause-ForCamera "Confirm the above before continuing."
+
+# Tier 2/3 keep the original clean-reinstall behavior.
+if ($tier -in @('2','3')) {
+    $ok = Invoke-RobloxReinstall
+    if (-not $ok) { return }
+    Section "Please complete the Before Launching steps now."
+} else {
+    Write-Host "Tier 1: skipping reinstall. Make sure Roblox is already installed and closed." -ForegroundColor $theme.Accent
+}
+
+# This is the part that was missing from the previous merged file:
+# actually execute all of the original Before/After Launching steps.
+Invoke-BeforeLaunching
+Invoke-AfterLaunching
+
+# Preserve the original post-join cleanup + findings collection for Tier 2/3.
+if ($tier -in @('2','3')) {
+    Invoke-CloseNonEssential
+    Invoke-FindingsCollector
+}
+
+# Keep the original Task Manager checkpoint visible after cleanup/findings.
+Write-Host ""
+Write-Host "=== TASK MANAGER CHECK ===" -ForegroundColor Magenta
+Write-Host "Before playing, SHOW Task Manager with ALL of the following:" -ForegroundColor Yellow
+Write-Host "1. Right-click Name and enable Process Name and Command Line." -ForegroundColor White
+Write-Host "2. Expand Command Line until Memory Usage reaches the right edge." -ForegroundColor White
+Write-Host "3. Click View and then Expand All (3 dots, top right)." -ForegroundColor White
+Write-Host "4. Scroll to the VERY BOTTOM and ensure EVERY process is visible." -ForegroundColor White
+Write-Host ""
+Write-Host "Do NOT play until Task Manager is configured and visible." -ForegroundColor Red
+Read-Host "Once Task Manager is shown correctly, press Enter to continue"
+
+Write-Host ""
+Write-Host "=== SETUP COMPLETE - YOU MAY NOW PLAY YOUR MATCH ===" -ForegroundColor $theme.Header
+Write-Host "Do NOT close this window (the proxy lock depends on it)." -ForegroundColor Red
+
+$ready = $null
+while ($ready -notmatch '^(y|yes|done)$') {
+    $ready = Read-Host "When your match is completely finished, type DONE to start the end-of-match checks"
+}
+
+Section "After Match Is Finished"
+Invoke-BeforeLaunching -Repeat
+Invoke-AfterLaunching -Repeat
+
+Section "Command Prompt Check"
+Start-Process "cmd.exe" -ArgumentList "/k title Recording-Check"
+Pause-ForCamera "Show your originally-opened Command Prompt, scroll it up and down quickly, then close it."
+
+Section "Removing Proxy Lock"
+$proxyJob = Get-Job -Name "ProxyLock" -ErrorAction SilentlyContinue
+if ($proxyJob) {
+    Stop-Job -Job $proxyJob -ErrorAction SilentlyContinue
+    Remove-Job -Job $proxyJob -Force -ErrorAction SilentlyContinue
+    Write-Host "Stopped proxy lock." -ForegroundColor Green
+}
+netsh winhttp reset proxy
+Pause-ForCamera "Show the 'netsh winhttp reset proxy' command and its output."
+
+if ($tier -in @('2','3')) {
+    Section "Uploads"
+    $zipDir = "$env:USERPROFILE\Desktop\AC-REC-OUTPUT"
+    if (Test-Path $zipDir) {
+        Start-Process "explorer.exe" -ArgumentList $zipDir
+    }
+    Pause-ForCamera "Upload the ZIP from AC-REC-OUTPUT to 'ow-submissions' while still recording."
+    Pause-ForCamera "End your MOSS session now."
+    Pause-ForCamera "Upload the MOSS file from the 'MOSS' folder to 'ow-submissions' while still recording."
+    Write-Host "You may now stop your recording, then upload it to YouTube and post the link in 'ow-submissions'." -ForegroundColor $theme.Header
+} else {
+    Write-Host "=== TIER 1 CHECKS COMPLETE - YOU MAY NOW STOP YOUR RECORDING ===" -ForegroundColor $theme.Header
+}
