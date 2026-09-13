@@ -27,22 +27,58 @@ function Find-Exe($names, $searchDirs) {
     return $null
 }
 
+function Write-Typewriter($text, $color, $delayMs = 6) {
+    foreach ($ch in $text.ToCharArray()) {
+        Write-Host -NoNewline $ch -ForegroundColor $color
+        Start-Sleep -Milliseconds $delayMs
+    }
+    Write-Host ""
+}
+
+function Show-LoadingBar($label, $color, $steps = 24, $delayMs = 20) {
+    Write-Host -NoNewline "$label " -ForegroundColor $color
+    Write-Host -NoNewline "[" -ForegroundColor DarkGray
+    for ($i = 0; $i -lt $steps; $i++) {
+        Start-Sleep -Milliseconds $delayMs
+        Write-Host -NoNewline "#" -ForegroundColor $color
+    }
+    Write-Host "] READY" -ForegroundColor $color
+}
+
 # =========================================================================
 # TIER SELECTION + THEME
 # =========================================================================
-Write-Host "Which recording level are you on?" -ForegroundColor White
+$menuOptions = @(
+    @{ Key = '1'; Label = 'TIER 1'; Desc = 'Standard checks - no reinstall, apps stay open';                       Color = 'Cyan'   }
+    @{ Key = '2'; Label = 'TIER 2'; Desc = 'Clean reinstall + Malwarebytes + close non-essential processes';       Color = 'Yellow' }
+    @{ Key = '3'; Label = 'TIER 3'; Desc = 'Everything in Tier 2 + Device Manager + phone recording required';     Color = 'Red'    }
+)
+
+Write-Host ""
+Write-Host "  +==============================================================+" -ForegroundColor DarkGray
+Write-Host "  |          R O B L O X   A N T I - C H E A T   S E T U P        |" -ForegroundColor White
+Write-Host "  +==============================================================+" -ForegroundColor DarkGray
+Write-Host ""
+foreach ($opt in $menuOptions) {
+    Write-Host ("   [{0}] " -f $opt.Key) -NoNewline -ForegroundColor $opt.Color
+    Write-Host ("{0,-7}" -f $opt.Label) -NoNewline -ForegroundColor $opt.Color
+    Write-Host ("  -  " + $opt.Desc) -ForegroundColor Gray
+}
+Write-Host ""
+
 $tier = $null
-while ($tier -notin @('1','2','3')) {
-    $tier = Read-Host "Enter 1, 2, or 3"
+while ($tier -notin @('1', '2', '3')) {
+    $tier = Read-Host "Select your recording tier (1-3)"
 }
 
 $themes = @{
-    '1' = @{ Name = "TIER 1"; Border = "Cyan";    Header = "Cyan";    Accent = "Green";   Banner = "DarkCyan" }
+    '1' = @{ Name = "TIER 1"; Border = "Cyan";    Header = "Cyan";    Accent = "Green";      Banner = "DarkCyan" }
     '2' = @{ Name = "TIER 2"; Border = "Yellow";  Header = "Yellow";  Accent = "DarkYellow"; Banner = "DarkYellow" }
-    '3' = @{ Name = "TIER 3"; Border = "Red";     Header = "Red";     Accent = "Magenta"; Banner = "DarkRed" }
+    '3' = @{ Name = "TIER 3"; Border = "Red";     Header = "Red";     Accent = "Magenta";    Banner = "DarkRed" }
 }
 $theme = $themes[$tier]
 
+Clear-Host
 $banner = @"
     _    ____    ____  _____ ____ ___  ____  ____ ___ _   _  ____
    / \  / ___|  |  _ \| ____/ ___/ _ \|  _ \|  _ \_ _| \ | |/ ___|
@@ -52,13 +88,20 @@ $banner = @"
 
                  $($theme.Name)  R U L E S
 "@
-Write-Host $banner -ForegroundColor $theme.Banner
-Write-Host "  Roblox Recording Rules Enforcement" -ForegroundColor DarkGray
+
+# Animated reveal: draw the banner in line-by-line, then confirm the tier is "loaded"
+foreach ($line in ($banner -split "`n")) {
+    Write-Host $line -ForegroundColor $theme.Banner
+    Start-Sleep -Milliseconds 25
+}
+Write-Host ""
+Write-Typewriter "  Roblox Recording Rules Enforcement" DarkGray 5
 Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
+Show-LoadingBar "  Initializing $($theme.Name) protocols" $theme.Accent
 Write-Host ""
 
 Write-Host "IMPORTANT: MAXIMIZE this PowerShell window now and keep it maximized." -ForegroundColor $theme.Header
-if ($tier -in @('2','3')) {
+if ($tier -in @('2', '3')) {
     Write-Host ""
     Write-Host "This will fully delete Roblox and reinstall it, then close every non-essential" -ForegroundColor $theme.Accent
     Write-Host "process once you've joined your match (recorder software is auto-detected and spared)." -ForegroundColor $theme.Accent
@@ -81,14 +124,27 @@ $hasIntel = $gpuNames -match 'Intel'
 $searchDirs = @("$env:USERPROFILE\Desktop", "$env:USERPROFILE\Downloads", "$env:ProgramFiles", "${env:ProgramFiles(x86)}")
 
 # =========================================================================
-# RECORDING SOFTWARE DETECTION (actually checks what's running)
+# RECORDING SOFTWARE DETECTION
 # =========================================================================
-function Get-DetectedRecorders {
+# NOTE: process detection can only tell us a vendor's capture app/process is
+# RUNNING - not that it is actively recording right now. Several of these
+# processes (nvcontainer, RadeonSoftware, AMDRSServ) start automatically
+# with your GPU driver and stay running in the background whether or not
+# you're recording anything, so they are NOT reliable proof of an active
+# recording on their own. obs64/obs32 and "NVIDIA Share" are a reasonable
+# signal the capture app is open, but still not proof it's rolling.
+function Get-DetectedCaptureSoftware {
     $patterns = @(
-        @{ Name = "obs64"; Vendor = "OBS" }, @{ Name = "obs32"; Vendor = "OBS" },
-        @{ Name = "obs-browser-page"; Vendor = "OBS" }, @{ Name = "obs-ffmpeg-mux"; Vendor = "OBS" }, @{ Name = "obs-ffmpeg-mux32"; Vendor = "OBS" },
-        @{ Name = "RadeonSoftware"; Vendor = "AMD" }, @{ Name = "AMDRSServ"; Vendor = "AMD" }, @{ Name = "AMDRSSrcExt"; Vendor = "AMD" },
-        @{ Name = "NVIDIA Share"; Vendor = "NVIDIA" }, @{ Name = "nvcontainer"; Vendor = "NVIDIA" }
+        @{ Name = "obs64";             Vendor = "OBS";    Reliable = $true }
+        @{ Name = "obs32";             Vendor = "OBS";    Reliable = $true }
+        @{ Name = "obs-browser-page";  Vendor = "OBS";    Reliable = $false }
+        @{ Name = "obs-ffmpeg-mux";    Vendor = "OBS";    Reliable = $false }
+        @{ Name = "obs-ffmpeg-mux32";  Vendor = "OBS";    Reliable = $false }
+        @{ Name = "RadeonSoftware";    Vendor = "AMD";    Reliable = $false }
+        @{ Name = "AMDRSServ";         Vendor = "AMD";    Reliable = $false }
+        @{ Name = "AMDRSSrcExt";       Vendor = "AMD";    Reliable = $false }
+        @{ Name = "NVIDIA Share";      Vendor = "NVIDIA"; Reliable = $true }
+        @{ Name = "nvcontainer";       Vendor = "NVIDIA"; Reliable = $false }
     )
     $running = @()
     foreach ($p in $patterns) {
@@ -99,22 +155,41 @@ function Get-DetectedRecorders {
 }
 
 Section "Recording Software Check"
-$detected = Get-DetectedRecorders
-if ($detected) {
-    Write-Host "Detected running capture components:" -ForegroundColor Green
-    $detected | ForEach-Object { Write-Host "  - $($_.Name) ($($_.Vendor))" -ForegroundColor Green }
-} else {
+$detected = Get-DetectedCaptureSoftware
+$reliableHits = @($detected | Where-Object { $_.Reliable })
+$unreliableHits = @($detected | Where-Object { -not $_.Reliable })
+
+if ($reliableHits) {
+    Write-Host "Detected capture software actively running:" -ForegroundColor Green
+    $reliableHits | ForEach-Object { Write-Host "  - $($_.Name) ($($_.Vendor))" -ForegroundColor Green }
+}
+if ($unreliableHits) {
+    Write-Host "Also running (background driver components - NOT proof of an active recording):" -ForegroundColor DarkYellow
+    $unreliableHits | ForEach-Object { Write-Host "  - $($_.Name) ($($_.Vendor))" -ForegroundColor DarkYellow }
+}
+if (-not $detected) {
     Write-Host "No known capture components detected as running yet." -ForegroundColor DarkYellow
 }
+
 $expectedVendor = if ($hasAMD) { "AMD" } elseif ($hasNVIDIA) { "NVIDIA" } elseif ($hasIntel) { "OBS (Intel)" } else { $null }
 if ($expectedVendor -and $detected -and ($detected.Vendor -notcontains $expectedVendor.Split(' ')[0])) {
     Write-Host "WARNING: your GPU suggests you should be using $expectedVendor, but that wasn't detected running." -ForegroundColor Red
 }
-if (-not $detected) {
+if (-not $reliableHits) {
     Write-Host "Start your official recorder now (AMD Adrenalin / NVIDIA Shadowplay / OBS depending on your GPU)." -ForegroundColor Yellow
     Read-Host "Press Enter once it's running"
-    $detected = Get-DetectedRecorders
+    $detected = Get-DetectedCaptureSoftware
+    $reliableHits = @($detected | Where-Object { $_.Reliable })
 }
+
+Write-Host ""
+Write-Host "Process detection can't confirm you're ACTUALLY recording - only that the app is open." -ForegroundColor Yellow
+$recConfirmed = $null
+while ($recConfirmed -notmatch '^[Yy]$') {
+    $recConfirmed = Read-Host "Look at your recorder now - is it actively recording (timer running / REC indicator lit)? (Y to confirm)"
+}
+
+$detected = Get-DetectedCaptureSoftware
 $recorderWhitelistNames = $detected | ForEach-Object { $_.Name.ToLower() }
 
 # =========================================================================
@@ -311,27 +386,15 @@ function Step-ACScript {
 
 function Invoke-BeforeLaunching([switch]$Repeat) {
     Step-TrayIcons
-    if ($tier -in @('2','3')) { Step-Autoruns; Step-Moss }
+    if ($tier -in @('2', '3')) { Step-Autoruns; Step-Moss }
     if ($tier -eq '3') { Step-DeviceManager }
     Step-UAC
     Step-RegeditExclusions
-    if ($tier -in @('1','3')) { Step-Prefetch; Step-RecentItems }
-    if ($tier -eq '1') {
-        Section "Windows Security"
-        Start-Process "windowsdefender://threatsettings"
-        Pause-ForCamera "Show Real-time / Cloud-delivered / Tamper Protection are ON."
-        Start-Process "windowsdefender://exclusions"
-        Pause-ForCamera "Show exclusions - only MOSSX64.exe permitted."
-        if (-not $Repeat) {
-            try { Start-MpScan -ScanType QuickScan } catch { Write-Host "Run Quick Scan manually." -ForegroundColor DarkYellow }
-        }
-        Start-Process "windowsdefender://threathistory"
-        Pause-ForCamera "Show Allowed Threats and Protection History."
-    }
-    if ($tier -in @('2','3')) { $global:justifiedExtras = Step-Malwarebytes -SkipScan:$Repeat }
+    if ($tier -in @('1', '3')) { Step-Prefetch; Step-RecentItems }
+    $global:justifiedExtras = Step-Malwarebytes -SkipScan:$Repeat
     Step-Bootstrapper
     Step-CoreIsolation
-    if ($tier -in @('2','3')) { Step-Hotkeys }
+    if ($tier -in @('2', '3')) { Step-Hotkeys }
     if ($tier -eq '1' -and -not $Repeat) { $global:justifiedExtras = Step-UnnecessarySoftwareCheck }
     Step-ProxyLock
     Step-JoinGame -Repeat:$Repeat
@@ -792,7 +855,7 @@ if ($tier -eq '3') {
 Pause-ForCamera "Confirm the above before continuing."
 
 # Tier 2/3 keep the original clean-reinstall behavior.
-if ($tier -in @('2','3')) {
+if ($tier -in @('2', '3')) {
     $ok = Invoke-RobloxReinstall
     if (-not $ok) { return }
     Section "Please complete the Before Launching steps now."
@@ -800,18 +863,15 @@ if ($tier -in @('2','3')) {
     Write-Host "Tier 1: skipping reinstall. Make sure Roblox is already installed and closed." -ForegroundColor $theme.Accent
 }
 
-# This is the part that was missing from the previous merged file:
-# actually execute all of the original Before/After Launching steps.
 Invoke-BeforeLaunching
 Invoke-AfterLaunching
 
 # Preserve the original post-join cleanup + findings collection for Tier 2/3.
-if ($tier -in @('2','3')) {
+if ($tier -in @('2', '3')) {
     Invoke-CloseNonEssential
     Invoke-FindingsCollector
 }
 
-# Keep the original Task Manager checkpoint visible after cleanup/findings.
 Write-Host ""
 Write-Host "=== TASK MANAGER CHECK ===" -ForegroundColor Magenta
 Write-Host "Before playing, SHOW Task Manager with ALL of the following:" -ForegroundColor Yellow
@@ -850,7 +910,7 @@ if ($proxyJob) {
 netsh winhttp reset proxy
 Pause-ForCamera "Show the 'netsh winhttp reset proxy' command and its output."
 
-if ($tier -in @('2','3')) {
+if ($tier -in @('2', '3')) {
     Section "Uploads"
     $zipDir = "$env:USERPROFILE\Desktop\AC-REC-OUTPUT"
     if (Test-Path $zipDir) {
