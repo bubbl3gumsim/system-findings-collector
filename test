@@ -92,7 +92,7 @@ function Write-BoxLine($text, $color, $width = 66) {
 Write-Host ""
 Write-Host "  +==================================================================+" -ForegroundColor DarkGray
 Write-BoxLine "ARSENAL COMPETITIVE" White 68
-Write-BoxLine "R O B L O X   A N T I - E X P L O I T  S E T U P" Gray 68
+Write-BoxLine "R O B L O X   A N T I - C H E A T   S E T U P" Gray 68
 Write-BoxLine "discord.gg/arsenalcomp" DarkCyan 68
 Write-Host "  +==================================================================+" -ForegroundColor DarkGray
 Write-Host ""
