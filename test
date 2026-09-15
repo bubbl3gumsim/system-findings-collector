@@ -83,9 +83,9 @@ $menuOptions = @(
 )
 
 Write-Host ""
-Write-Host "  +==============================================================+" -ForegroundColor DarkGray
-Write-Host "  |          R O B L O X   A N T I - C H E A T   S E T U P        |" -ForegroundColor White
-Write-Host "  +==============================================================+" -ForegroundColor DarkGray
+Write-Host "  +=================================================================+" -ForegroundColor DarkGray
+Write-Host "  |          R O B L O X   A N T I - E X P L O I T   S E T U P        |" -ForegroundColor White
+Write-Host "  +=================================================================+" -ForegroundColor DarkGray
 Write-Host ""
 foreach ($opt in $menuOptions) {
     Write-Host ("   [{0}] " -f $opt.Key) -NoNewline -ForegroundColor $opt.Color
