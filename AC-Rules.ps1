@@ -1,0 +1,911 @@
+#Requires -RunAsAdministrator
+Clear-Host
+
+# =========================================================================
+# HELPERS
+# =========================================================================
+function Section($title) {
+    Write-Host ""
+    Write-Host ("=" * 70) -ForegroundColor $theme.Border
+    Write-Host " $title" -ForegroundColor $theme.Header
+    Write-Host ("=" * 70) -ForegroundColor $theme.Border
+}
+
+function Pause-ForCamera($msg) {
+    Write-Host $msg -ForegroundColor $theme.Accent
+    Read-Host "Press Enter once this is shown on your recording"
+}
+
+function Find-Exe($names, $searchDirs) {
+    foreach ($dir in $searchDirs) {
+        if (-not $dir -or -not (Test-Path $dir)) { continue }
+        foreach ($n in $names) {
+            $hit = Get-ChildItem -Path $dir -Filter $n -Recurse -ErrorAction SilentlyContinue -File | Select-Object -First 1
+            if ($hit) { return $hit.FullName }
+        }
+    }
+    return $null
+}
+
+function Write-Typewriter($text, $color, $delayMs = 6) {
+    foreach ($ch in $text.ToCharArray()) {
+        Write-Host -NoNewline $ch -ForegroundColor $color
+        Start-Sleep -Milliseconds $delayMs
+    }
+    Write-Host ""
+}
+
+function Show-LoadingBar($label, $color, $steps = 24, $delayMs = 20) {
+    Write-Host -NoNewline "$label " -ForegroundColor $color
+    Write-Host -NoNewline "[" -ForegroundColor DarkGray
+    for ($i = 0; $i -lt $steps; $i++) {
+        Start-Sleep -Milliseconds $delayMs
+        Write-Host -NoNewline "#" -ForegroundColor $color
+    }
+    Write-Host "] READY" -ForegroundColor $color
+}
+
+# =========================================================================
+# TIER SELECTION + THEME
+# =========================================================================
+$menuOptions = @(
+    @{ Key = '1'; Label = 'TIER 1'; Desc = 'Standard checks - no reinstall, apps stay open';                       Color = 'Cyan'   }
+    @{ Key = '2'; Label = 'TIER 2'; Desc = 'Clean reinstall + Malwarebytes + close non-essential processes';       Color = 'Yellow' }
+    @{ Key = '3'; Label = 'TIER 3'; Desc = 'Everything in Tier 2 + Device Manager + phone recording required';     Color = 'Red'    }
+)
+
+Write-Host ""
+Write-Host "  +==============================================================+" -ForegroundColor DarkGray
+Write-Host "  |          R O B L O X   A N T I - C H E A T   S E T U P        |" -ForegroundColor White
+Write-Host "  +==============================================================+" -ForegroundColor DarkGray
+Write-Host ""
+foreach ($opt in $menuOptions) {
+    Write-Host ("   [{0}] " -f $opt.Key) -NoNewline -ForegroundColor $opt.Color
+    Write-Host ("{0,-7}" -f $opt.Label) -NoNewline -ForegroundColor $opt.Color
+    Write-Host ("  -  " + $opt.Desc) -ForegroundColor Gray
+}
+Write-Host ""
+
+$tier = $null
+while ($tier -notin @('1', '2', '3')) {
+    $tier = Read-Host "Select your recording tier (1-3)"
+}
+
+$themes = @{
+    '1' = @{ Name = "TIER 1"; Border = "Cyan";    Header = "Cyan";    Accent = "Green";      Banner = "DarkCyan" }
+    '2' = @{ Name = "TIER 2"; Border = "Yellow";  Header = "Yellow";  Accent = "DarkYellow"; Banner = "DarkYellow" }
+    '3' = @{ Name = "TIER 3"; Border = "Red";     Header = "Red";     Accent = "Magenta";    Banner = "DarkRed" }
+}
+$theme = $themes[$tier]
+
+Clear-Host
+$banner = @"
+    _    ____    ____  _____ ____ ___  ____  ____ ___ _   _  ____
+   / \  / ___|  |  _ \| ____/ ___/ _ \|  _ \|  _ \_ _| \ | |/ ___|
+  / _ \| |      | |_) |  _|| |  | | | | |_) | | | | ||  \| | |  _
+ / ___ \ |___   |  _ <| |__| |__| |_| |  _ <| |_| | || |\  | |_| |
+/_/   \_\____|  |_| \_\_____\____\___/|_| \_\____/___|_| \_|\____|
+
+                 $($theme.Name)  R U L E S
+"@
+
+# Animated reveal: draw the banner in line-by-line, then confirm the tier is "loaded"
+foreach ($line in ($banner -split "`n")) {
+    Write-Host $line -ForegroundColor $theme.Banner
+    Start-Sleep -Milliseconds 25
+}
+Write-Host ""
+Write-Typewriter "  Roblox Recording Rules Enforcement" DarkGray 5
+Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
+Show-LoadingBar "  Initializing $($theme.Name) protocols" $theme.Accent
+Write-Host ""
+
+Write-Host "IMPORTANT: MAXIMIZE this PowerShell window now and keep it maximized." -ForegroundColor $theme.Header
+if ($tier -in @('2', '3')) {
+    Write-Host ""
+    Write-Host "This will fully delete Roblox and reinstall it, then close every non-essential" -ForegroundColor $theme.Accent
+    Write-Host "process once you've joined your match (recorder software is auto-detected and spared)." -ForegroundColor $theme.Accent
+    Write-Host "Unsaved work in other apps WILL be lost. Save everything first." -ForegroundColor Red
+} else {
+    Write-Host ""
+    Write-Host "Tier 1 does NOT reinstall Roblox and does NOT close your other apps." -ForegroundColor $theme.Accent
+}
+Write-Host ""
+$confirm = Read-Host "Continue? (Y/N)"
+if ($confirm -notmatch '^[Yy]') {
+    Write-Host "Cancelled. Nothing was changed." -ForegroundColor Cyan
+    return
+}
+
+$gpuNames = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+$hasAMD = $gpuNames -match 'AMD|Radeon'
+$hasNVIDIA = $gpuNames -match 'NVIDIA|GeForce'
+$hasIntel = $gpuNames -match 'Intel'
+$searchDirs = @("$env:USERPROFILE\Desktop", "$env:USERPROFILE\Downloads", "$env:ProgramFiles", "${env:ProgramFiles(x86)}")
+
+# =========================================================================
+# RECORDING SOFTWARE DETECTION
+# =========================================================================
+# NOTE: process detection can only tell us a vendor's capture app/process is
+# RUNNING - not that it is actively recording right now. Several of these
+# processes (nvcontainer, RadeonSoftware, AMDRSServ) start automatically
+# with your GPU driver and stay running in the background whether or not
+# you're recording anything, so they are NOT reliable proof of an active
+# recording on their own. obs64/obs32 and "NVIDIA Share" are a reasonable
+# signal the capture app is open, but still not proof it's rolling.
+function Get-DetectedCaptureSoftware {
+    $patterns = @(
+        @{ Name = "obs64";             Vendor = "OBS";    Reliable = $true }
+        @{ Name = "obs32";             Vendor = "OBS";    Reliable = $true }
+        @{ Name = "obs-browser-page";  Vendor = "OBS";    Reliable = $false }
+        @{ Name = "obs-ffmpeg-mux";    Vendor = "OBS";    Reliable = $false }
+        @{ Name = "obs-ffmpeg-mux32";  Vendor = "OBS";    Reliable = $false }
+        @{ Name = "RadeonSoftware";    Vendor = "AMD";    Reliable = $false }
+        @{ Name = "AMDRSServ";         Vendor = "AMD";    Reliable = $false }
+        @{ Name = "AMDRSSrcExt";       Vendor = "AMD";    Reliable = $false }
+        @{ Name = "NVIDIA Share";      Vendor = "NVIDIA"; Reliable = $true }
+        @{ Name = "nvcontainer";       Vendor = "NVIDIA"; Reliable = $false }
+    )
+    $running = @()
+    foreach ($p in $patterns) {
+        $proc = Get-Process -Name $p.Name -ErrorAction SilentlyContinue
+        if ($proc) { $running += $p }
+    }
+    return $running
+}
+
+Section "Recording Software Check"
+$detected = Get-DetectedCaptureSoftware
+$reliableHits = @($detected | Where-Object { $_.Reliable })
+$unreliableHits = @($detected | Where-Object { -not $_.Reliable })
+
+if ($reliableHits) {
+    Write-Host "Detected capture software actively running:" -ForegroundColor Green
+    $reliableHits | ForEach-Object { Write-Host "  - $($_.Name) ($($_.Vendor))" -ForegroundColor Green }
+}
+if ($unreliableHits) {
+    Write-Host "Also running (background driver components - NOT proof of an active recording):" -ForegroundColor DarkYellow
+    $unreliableHits | ForEach-Object { Write-Host "  - $($_.Name) ($($_.Vendor))" -ForegroundColor DarkYellow }
+}
+if (-not $detected) {
+    Write-Host "No known capture components detected as running yet." -ForegroundColor DarkYellow
+}
+
+$expectedVendor = if ($hasAMD) { "AMD" } elseif ($hasNVIDIA) { "NVIDIA" } elseif ($hasIntel) { "OBS (Intel)" } else { $null }
+if ($expectedVendor -and $detected -and ($detected.Vendor -notcontains $expectedVendor.Split(' ')[0])) {
+    Write-Host "WARNING: your GPU suggests you should be using $expectedVendor, but that wasn't detected running." -ForegroundColor Red
+}
+if (-not $reliableHits) {
+    Write-Host "Start your official recorder now (AMD Adrenalin / NVIDIA Shadowplay / OBS depending on your GPU)." -ForegroundColor Yellow
+    Read-Host "Press Enter once it's running"
+    $detected = Get-DetectedCaptureSoftware
+    $reliableHits = @($detected | Where-Object { $_.Reliable })
+}
+
+Write-Host ""
+Write-Host "Process detection can't confirm you're ACTUALLY recording - only that the app is open." -ForegroundColor Yellow
+$recConfirmed = $null
+while ($recConfirmed -notmatch '^[Yy]$') {
+    $recConfirmed = Read-Host "Look at your recorder now - is it actively recording (timer running / REC indicator lit)? (Y to confirm)"
+}
+
+$detected = Get-DetectedCaptureSoftware
+$recorderWhitelistNames = $detected | ForEach-Object { $_.Name.ToLower() }
+
+# =========================================================================
+# STAGE: CLEAN REINSTALL (Tier 2/3 only)
+# =========================================================================
+function Invoke-RobloxReinstall {
+    Section "Roblox Clean Reinstall"
+    $robloxProcs = Get-Process RobloxPlayerBeta, RobloxPlayerLauncher, RobloxCrashHandler -ErrorAction SilentlyContinue
+    if ($robloxProcs) {
+        Write-Host "Closing Roblox..." -ForegroundColor Cyan
+        $robloxProcs | Stop-Process -Force
+        $robloxProcs | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+    }
+
+    $robloxPath = "$env:LOCALAPPDATA\Roblox"
+    if (Test-Path $robloxPath) {
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                Remove-Item $robloxPath -Recurse -Force -ErrorAction Stop
+                Write-Host "Removed: $robloxPath" -ForegroundColor Green
+                break
+            } catch {
+                if ($attempt -lt 3) { Start-Sleep -Seconds 2 } else { Write-Host "Could not fully delete $robloxPath : $_" -ForegroundColor Red }
+            }
+        }
+    }
+
+    Write-Host "Opening the Roblox download page - install it yourself, this will detect when it's done." -ForegroundColor Cyan
+    Start-Process "https://www.roblox.com/download"
+
+    $installed = $false
+    $elapsed = 0
+    while (-not $installed -and $elapsed -lt 600) {
+        Start-Sleep -Seconds 3
+        $elapsed += 3
+        if ((Test-Path (Join-Path $robloxPath "Versions")) -or (Get-Process RobloxPlayerBeta, RobloxPlayerLauncher -ErrorAction SilentlyContinue)) {
+            $installed = $true
+        } else {
+            Write-Host "." -NoNewline -ForegroundColor DarkGray
+        }
+    }
+    Write-Host ""
+    if (-not $installed) {
+        Write-Host "Didn't detect a completed install after 10 minutes. Launch Roblox once manually, then re-run." -ForegroundColor Red
+        return $false
+    }
+    Write-Host "Roblox install detected." -ForegroundColor Green
+    return $true
+}
+
+# =========================================================================
+# BEFORE-LAUNCHING STEP FUNCTIONS
+# =========================================================================
+function Step-TrayIcons {
+    Section "Hidden Tray Icons"
+    Pause-ForCamera "Click the small arrow in the system tray ('Show hidden icons') and hover over each one."
+}
+
+function Step-Autoruns {
+    Section "Sysinternals Autoruns"
+    $exe = Find-Exe @("autoruns64.exe", "autoruns.exe") $searchDirs
+    if ($exe) { Start-Process $exe -Verb RunAs } else { Write-Host "Launch Autoruns manually as Administrator." -ForegroundColor DarkYellow }
+    Pause-ForCamera "Go to the 'Everything' tab, wait for the scan, click Expand All, scroll slowly top to bottom."
+}
+
+function Step-Moss {
+    Section "MOSS"
+    $exe = Find-Exe @("MOSS.exe", "moss.exe") $searchDirs
+    if ($exe) { Start-Process $exe } else { Write-Host "Launch MOSS manually." -ForegroundColor DarkYellow }
+    Pause-ForCamera "File > Parameters > Pick Roblox > OK > Capture > Start."
+}
+
+function Step-DeviceManager {
+    Section "Device Manager"
+    Start-Process "devmgmt.msc"
+    Pause-ForCamera "View > Show Hidden Devices, expand Display Adapters and Monitors."
+}
+
+function Step-UAC {
+    Section "UAC Level"
+    try { Start-Process "UserAccountControlSettings" } catch { Start-Process "control.exe" -ArgumentList "/name Microsoft.UserAccounts" }
+    Pause-ForCamera "Confirm UAC slider is on the second-lowest setting."
+}
+
+function Step-RegeditExclusions {
+    Section "Defender Exclusions (Registry)"
+    $regeditKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit"
+    try {
+        if (-not (Test-Path $regeditKey)) { New-Item -Path $regeditKey -Force | Out-Null }
+        Set-ItemProperty -Path $regeditKey -Name "LastKey" -Value "Computer\HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows Defender\Exclusions" -Force
+    } catch {}
+    Start-Process "regedit.exe"
+    Pause-ForCamera "Confirm it opened at ...\Windows Defender\Exclusions and click through all 5 subfolders."
+}
+
+function Step-Prefetch {
+    Section "Prefetch Folder"
+    Start-Process "explorer.exe" -ArgumentList "$env:WINDIR\Prefetch"
+    Pause-ForCamera "Scroll to the bottom. Open and show contents of any subfolders present."
+}
+
+function Step-RecentItems {
+    Section "Recent Items"
+    Start-Process "explorer.exe" -ArgumentList "shell:recent"
+    Pause-ForCamera "Scroll to the bottom. Open and show contents of any subfolders present."
+}
+
+function Step-Malwarebytes([switch]$SkipScan) {
+    Section "Malwarebytes"
+    $exe = Find-Exe @("mbam.exe", "Malwarebytes.exe") @("$env:ProgramFiles\Malwarebytes\Anti-Malware", "$env:ProgramFiles\Malwarebytes", "${env:ProgramFiles(x86)}\Malwarebytes")
+    if ($exe) { Start-Process $exe } else { Write-Host "Launch Malwarebytes manually." -ForegroundColor DarkYellow }
+    Pause-ForCamera "Dashboard > Detection History > Allow List: only nohope.eu and http://download.ericzimmermanstools.com/ permitted."
+    Pause-ForCamera "Settings > Scan and Detections: confirm 'Scan for Rootkits' is enabled."
+    if (-not $SkipScan) { Pause-ForCamera "Dashboard > Scanner > Scan. Wait, then quarantine all detections." }
+    Pause-ForCamera "Settings > Notifications: confirm all Protection notifications are on."
+}
+
+function Step-Bootstrapper {
+    Section "Bootstrapper Integrations"
+    $found = @("Bloxstrap", "Fishstrap") | Where-Object { Get-Process -Name $_ -ErrorAction SilentlyContinue }
+    if (-not $found) { Write-Host "None detected. Open yours manually if you use one." -ForegroundColor Gray }
+    Pause-ForCamera "Open your bootstrapper -> Integrations -> scroll to the bottom."
+}
+
+function Step-CoreIsolation {
+    Section "Core Isolation / Memory Integrity"
+    Start-Process "windowsdefender://coreisolation"
+    Pause-ForCamera "Show Core Isolation ON."
+    Pause-ForCamera "Show Kernel-Mode Hardware-enforced Stack Protection ON."
+    Pause-ForCamera "Show Microsoft Vulnerable Driver Blocklist ON."
+}
+
+function Step-Hotkeys {
+    Section "Recording Software Hotkeys"
+    Pause-ForCamera "Open your recorder's hotkey settings and show them."
+}
+
+function Step-UnnecessarySoftwareCheck {
+    Section "Unnecessary Hotkey/Mouse Software"
+    Write-Host "Rule: close anything unnecessary. If something must stay open, you have to justify it on camera." -ForegroundColor $theme.Accent
+    $extra = Read-Host "List any extra process names you're keeping open and can justify (comma separated, or leave blank)"
+    if ($extra) {
+        Pause-ForCamera "Explain on camera why each of these is necessary: $extra"
+        return ($extra -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+    }
+    return @()
+}
+
+function Step-ProxyLock {
+    Section "WinHTTP Proxy Lock"
+    if (-not (Get-Job -Name "ProxyLock" -ErrorAction SilentlyContinue)) {
+        Start-Job -Name "ProxyLock" -ScriptBlock { while ($true) { netsh winhttp set proxy 127.0.0.1:1 | Out-Null } } | Out-Null
+        Write-Host "Started proxy lock." -ForegroundColor Green
+    }
+    Write-Host "Leave THIS window open for the rest of the match." -ForegroundColor Red
+    Pause-ForCamera "Show the proxy lock command/output before continuing."
+}
+
+function Step-JoinGame([switch]$Repeat) {
+    Section "Join Game"
+    if ($Repeat) {
+        Write-Host "Press Windows + Tab now. Only one desktop is allowed." -ForegroundColor $theme.Accent
+        Read-Host "Press Enter once shown"
+    } else {
+        Write-Host "Hold Windows + Tab while joining until fully loaded. Only one desktop is allowed." -ForegroundColor $theme.Accent
+        Read-Host "Once joined and loaded, press Enter to continue"
+    }
+}
+
+function Step-TaskManager {
+    Section "Task Manager"
+    Start-Process "taskmgr.exe"
+    Pause-ForCamera "Enable Process Name + Command Line columns, expand Command Line to the right edge, View > Expand All, scroll to the very bottom."
+}
+
+function Step-PowerShellDump {
+    Section "PowerShell Process/System Dump"
+    Get-CimInstance Win32_Process | Select-Object Name, CommandLine | Format-Table -AutoSize
+    Pause-ForCamera "Scroll this output top to bottom, then back up."
+    systeminfo | findstr /i "hyper os version page virtualization"
+    Pause-ForCamera "Confirm this output is visible."
+}
+
+function Invoke-BeforeLaunching([switch]$Repeat) {
+    Step-TrayIcons
+    if ($tier -in @('2', '3')) { Step-Autoruns; Step-Moss }
+    if ($tier -eq '3') { Step-DeviceManager }
+    Step-UAC
+    Step-RegeditExclusions
+    if ($tier -in @('1', '3')) { Step-Prefetch; Step-RecentItems }
+    $global:justifiedExtras = Step-Malwarebytes -SkipScan:$Repeat
+    Step-Bootstrapper
+    Step-CoreIsolation
+    if ($tier -in @('2', '3')) { Step-Hotkeys }
+    if ($tier -eq '1' -and -not $Repeat) { $global:justifiedExtras = Step-UnnecessarySoftwareCheck }
+    Step-ProxyLock
+    Step-JoinGame -Repeat:$Repeat
+}
+
+function Invoke-AfterLaunching([switch]$Repeat) {
+    Step-TaskManager
+    if ($tier -eq '1') {
+        Step-PowerShellDump
+    }
+}
+
+# =========================================================================
+# STAGE: CLOSE NON-ESSENTIAL PROCESSES (Tier 2/3 only, whitelist-based)
+# =========================================================================
+function Invoke-CloseNonEssential {
+    Section "Close Non-Essential Processes"
+
+    # Core Windows processes that must not be terminated.
+    $systemWhitelist = @(
+        "System","Idle","Registry","smss","csrss","wininit","winlogon","services","lsass","lsm",
+        "svchost","dwm","explorer","fontdrvhost","RuntimeBroker","sihost","taskhostw","ctfmon",
+        "conhost","dllhost","WUDFHost","SearchIndexer","SearchHost","StartMenuExperienceHost",
+        "ShellExperienceHost","ApplicationFrameHost","TextInputHost","spoolsv","audiodg",
+        "powershell","pwsh","WindowsTerminal","OpenConsole","cmd"
+    )
+
+    $robloxWhitelist = @(
+        "RobloxPlayerBeta","RobloxPlayerLauncher","RobloxCrashHandler"
+    )
+
+    $whitelist = ($systemWhitelist + $robloxWhitelist + $recorderWhitelistNames + $global:justifiedExtras) |
+        ForEach-Object { $_.ToLower() } | Select-Object -Unique
+
+    Write-Host "Whitelisted recorder components: $($recorderWhitelistNames -join ', ')" -ForegroundColor Green
+    if ($global:justifiedExtras) {
+        Write-Host "Whitelisted justified extras: $($global:justifiedExtras -join ', ')" -ForegroundColor Green
+    }
+
+    $selfPid = $PID
+    $candidates = @(Get-Process | Where-Object {
+        $_.Id -ne $selfPid -and
+        ($whitelist -notcontains $_.ProcessName.ToLower())
+    })
+
+    if (-not $candidates) {
+        Write-Host "Nothing to close - only whitelisted system/Roblox/recorder processes are running." -ForegroundColor Gray
+        return
+    }
+
+    Write-Host "Found $($candidates.Count) non-essential process(es). Checking each one..." -ForegroundColor Cyan
+    Write-Host ""
+
+    $log = @()
+
+    foreach ($proc in $candidates) {
+        $path = $null
+        $signed = $null
+        $suspicious = $false
+        $reason = @()
+        $status = "Unknown"
+
+        try { $path = $proc.Path } catch { $path = $null }
+
+        if ($path) {
+            try {
+                $sig = Get-AuthenticodeSignature -FilePath $path -ErrorAction Stop
+                $signed = $sig.Status -eq "Valid"
+            } catch {
+                $signed = $false
+            }
+
+            if (-not $signed) {
+                $suspicious = $true
+                $reason += "unsigned or invalid signature"
+            }
+
+            if ($path -match '\\(Temp|Downloads|AppData\\Local\\Temp)\\') {
+                $suspicious = $true
+                $reason += "running from a temp/downloads folder"
+            }
+        } else {
+            $reason += "path unavailable"
+        }
+
+        try {
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            $status = "Closed"
+        } catch {
+            try {
+                $servicesForPid = Get-CimInstance Win32_Service -Filter "ProcessId = $($proc.Id)" -ErrorAction Stop
+
+                if ($servicesForPid) {
+                    $stoppedServiceNames = @()
+
+                    foreach ($svc in $servicesForPid) {
+                        try {
+                            $service = Get-Service -Name $svc.Name -ErrorAction Stop
+
+                            if ($service.Status -ne "Stopped") {
+                                Stop-Service -Name $svc.Name -Force -ErrorAction Stop
+                                $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(10))
+                            }
+
+                            $stoppedServiceNames += $svc.Name
+                        } catch {
+                            # Continue trying other services hosted by this PID.
+                        }
+                    }
+
+                    Start-Sleep -Milliseconds 500
+
+                    if (-not (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue)) {
+                        if ($stoppedServiceNames.Count -gt 0) {
+                            $status = "Closed (service stopped: $($stoppedServiceNames -join ', '))"
+                        } else {
+                            $status = "Service found, but could not be stopped"
+                        }
+                    } else {
+                        try {
+                            $tkOut = & taskkill /F /PID $proc.Id 2>&1
+                            if ($LASTEXITCODE -eq 0) {
+                                $status = "Closed (service stopped + taskkill)"
+                            } else {
+                                $status = "Failed to close: $tkOut"
+                            }
+                        } catch {
+                            $status = "Failed to close: $($_.Exception.Message)"
+                        }
+                    }
+                } else {
+                    try {
+                        $tkOut = & taskkill /F /PID $proc.Id 2>&1
+                        if ($LASTEXITCODE -eq 0) {
+                            $status = "Closed (via taskkill fallback)"
+                        } else {
+                            $status = "Failed to close: $tkOut"
+                        }
+                    } catch {
+                        $status = "Failed to close: $($_.Exception.Message)"
+                    }
+                }
+            } catch {
+                $status = "Failed to close: $($_.Exception.Message)"
+            }
+        }
+
+        $log += [PSCustomObject]@{
+            Name       = $proc.ProcessName
+            PID        = $proc.Id
+            Path       = $path
+            Signed     = $signed
+            Suspicious = $suspicious
+            Notes      = ($reason -join "; ")
+            Status     = $status
+        }
+
+        if ($suspicious) {
+            $color = "Red"
+        } elseif ($status -like "Closed*") {
+            $color = "Green"
+        } elseif ($status -like "Failed*") {
+            $color = "DarkYellow"
+        } else {
+            $color = "Gray"
+        }
+
+        Write-Host ("{0,-25} PID {1,-7} {2}" -f $proc.ProcessName, $proc.Id, $status) -ForegroundColor $color
+    }
+
+    Write-Host ""
+    $suspiciousCount = @($log | Where-Object { $_.Suspicious }).Count
+    $closedCount = @($log | Where-Object { $_.Status -like "Closed*" }).Count
+
+    Write-Host "Done. Closed $closedCount of $($candidates.Count) process(es); $suspiciousCount flagged as suspicious." -ForegroundColor Green
+
+    if ($suspiciousCount -gt 0) {
+        Write-Host ""
+        Write-Host "Flagged processes (unsigned/invalid signature and/or temp/download path):" -ForegroundColor Red
+        $log | Where-Object { $_.Suspicious } | ForEach-Object {
+            Write-Host "  $($_.Name) (PID $($_.PID)) - $($_.Path)" -ForegroundColor Red
+            Write-Host "    Reason: $($_.Notes)" -ForegroundColor Red
+        }
+        Write-Host ""
+        Write-Host "A flag is not proof of malicious activity; some legitimate tools may be unsigned." -ForegroundColor Yellow
+    }
+
+    $logDir = Join-Path ([Environment]::GetFolderPath('Desktop')) "AC-FINDINGS"
+    New-Item -Path $logDir -ItemType Directory -Force | Out-Null
+    $logPath = Join-Path $logDir ("process-log-{0}.csv" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+    $log | Export-Csv -Path $logPath -NoTypeInformation -Encoding UTF8
+
+    Write-Host "Process log saved to: $logPath" -ForegroundColor Gray
+}
+
+function Invoke-FindingsCollector {
+    Section "Findings Collection"
+
+    $collector = {
+        $desktop = [Environment]::GetFolderPath('Desktop')
+        $stamp   = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+        $temp    = Join-Path $env:TEMP "findings_$stamp"
+        New-Item -ItemType Directory -Path $temp -Force | Out-Null
+
+        function Save($name, $scriptblock) {
+            $path = Join-Path $temp "$name.txt"
+            try {
+                (& $scriptblock) | Out-String -Width 300 | Set-Content -Path $path -Encoding UTF8
+            } catch {
+                "ERROR: $_" | Set-Content -Path $path -Encoding UTF8
+            }
+        }
+
+        # 1. Process list with parentage + executable size
+        Save "01_process_parentage" {
+            $parentMap = @{}
+            Get-Process | ForEach-Object { $parentMap[$_.Id] = $_.Name }
+
+            Get-CimInstance Win32_Process | Select-Object Name, ProcessId,
+                @{n='ParentName';e={
+                    if ($parentMap.ContainsKey([int]$_.ParentProcessId)) {
+                        $parentMap[[int]$_.ParentProcessId]
+                    } else { $null }
+                }},
+                @{n='SizeMB';e={
+                    if ($_.ExecutablePath -and (Test-Path $_.ExecutablePath)) {
+                        [math]::Round((Get-Item $_.ExecutablePath -ErrorAction SilentlyContinue).Length / 1MB, 2)
+                    } else { $null }
+                }},
+                CommandLine
+        }
+
+        # 2. Virtualization / system information
+        Save "02_systeminfo_virtualization" {
+            systeminfo | findstr /i "hyper os version page virtualization"
+        }
+
+        # 3. Scheduled tasks
+        Save "03_scheduled_tasks" { Get-ScheduledTask }
+
+        # 4. Tasklist
+        Save "04_tasklist" { tasklist }
+
+        # 5. Process start times
+        Save "05_process_starttimes" {
+            Get-Process | Select-Object Name, StartTime -ErrorAction SilentlyContinue
+        }
+
+        # 6. Running services
+        Save "06_running_services" {
+            Get-Service |
+                Where-Object { $_.Status -eq 'Running' } |
+                Select-Object Name, DisplayName, Status
+        }
+
+        # 7. Unsigned executables in Program Files + hashes
+        $pfPaths = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) |
+            Where-Object { $_ -and (Test-Path $_) } |
+            Select-Object -Unique
+
+        $pfFiles = Get-ChildItem -Path $pfPaths -Recurse -Include *.exe -ErrorAction SilentlyContinue
+
+        $sizeMap = @{}
+        foreach ($f in $pfFiles) {
+            $sizeMap[$f.FullName] = $f.Length
+        }
+
+        $unsigned = $pfFiles |
+            Get-AuthenticodeSignature |
+            Where-Object { $_.Status -ne 'Valid' } |
+            Select-Object Path, Status,
+                @{n='SizeMB';e={
+                    if ($sizeMap.ContainsKey($_.Path)) {
+                        [math]::Round($sizeMap[$_.Path] / 1MB, 2)
+                    } else { $null }
+                }}
+
+        Save "07_unsigned_program_files_exes" { $unsigned }
+
+        Save "07b_unsigned_exe_hashes" {
+            foreach ($i in $unsigned) {
+                "-- $($i.Path) (Size: $($i.SizeMB) MB) --"
+                try {
+                    certutil -hashfile "$($i.Path)" SHA256
+                } catch {
+                    "Could not hash: $_"
+                }
+                ""
+            }
+            "NOTE: VirusTotal checking is manual."
+        }
+
+        # 8. Root certificates
+        Save "08_root_certificates" {
+            Get-ChildItem Cert:\LocalMachine\Root |
+                Select-Object Subject, Thumbprint, NotBefore |
+                Sort-Object NotBefore -Descending
+        }
+
+        # 9. Prefetch metadata
+        Save "09_prefetch_files" {
+            Get-ChildItem "$env:WINDIR\Prefetch" -Filter *.pf -ErrorAction SilentlyContinue |
+                Select-Object Name,
+                    @{n='SizeKB';e={[math]::Round($_.Length / 1KB, 2)}},
+                    CreationTime, LastWriteTime, LastAccessTime |
+                Sort-Object LastWriteTime -Descending
+        }
+
+        # 10. Recent items metadata
+        Save "10_recent_items" {
+            $recentPath = "$env:APPDATA\Microsoft\Windows\Recent"
+            Get-ChildItem $recentPath -ErrorAction SilentlyContinue |
+                Select-Object Name,
+                    @{n='SizeKB';e={[math]::Round($_.Length / 1KB, 2)}},
+                    CreationTime, LastWriteTime |
+                Sort-Object LastWriteTime -Descending
+        }
+
+        # 11. Recent item targets
+        Save "11_recent_items_targets" {
+            $sh = New-Object -ComObject WScript.Shell
+
+            Get-ChildItem "$env:APPDATA\Microsoft\Windows\Recent" -Filter *.lnk -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                    try {
+                        $lnk = $sh.CreateShortcut($_.FullName)
+                        $targetSizeKB = $null
+
+                        if ($lnk.TargetPath -and (Test-Path $lnk.TargetPath)) {
+                            $targetSizeKB = [math]::Round(
+                                (Get-Item $lnk.TargetPath -ErrorAction SilentlyContinue).Length / 1KB, 2
+                            )
+                        }
+
+                        [PSCustomObject]@{
+                            Name          = $_.Name
+                            Target        = $lnk.TargetPath
+                            Arguments     = $lnk.Arguments
+                            LnkSizeKB     = [math]::Round($_.Length / 1KB, 2)
+                            TargetSizeKB  = $targetSizeKB
+                            LastWriteTime = $_.LastWriteTime
+                        }
+                    } catch {
+                        [PSCustomObject]@{
+                            Name = $_.Name
+                            Target = "ERROR"
+                            Arguments = ""
+                            LnkSizeKB = $null
+                            TargetSizeKB = $null
+                            LastWriteTime = $_.LastWriteTime
+                        }
+                    }
+                }
+        }
+
+        # 12. Raw artifact copies from the original collector
+        $logsRoot = Join-Path $temp "logs"
+        New-Item -ItemType Directory -Path $logsRoot -Force | Out-Null
+
+        function Copy-Artifact($label, $source, $destSubfolder) {
+            $dest = Join-Path $logsRoot $destSubfolder
+
+            try {
+                if (Test-Path $source) {
+                    New-Item -ItemType Directory -Path $dest -Force | Out-Null
+                    Copy-Item -Path (Join-Path $source '*') -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+
+                    $copied = @(Get-ChildItem $dest -Recurse -File -ErrorAction SilentlyContinue)
+                    $count  = $copied.Count
+                    $sum    = ($copied | Measure-Object Length -Sum).Sum
+                    $sizeMB = if ($null -eq $sum) { 0 } else { [math]::Round($sum / 1MB, 2) }
+
+                    "OK   [$label] $count files, $sizeMB MB copied from '$source' -> logs\$destSubfolder"
+                } else {
+                    "SKIP [$label] source not found: $source"
+                }
+            } catch {
+                "FAIL [$label] error copying from '$source': $_"
+            }
+        }
+
+        $copyLog = @()
+        $copyLog += Copy-Artifact "Prefetch" "$env:WINDIR\Prefetch" "Prefetch"
+        $copyLog += Copy-Artifact "Recent items" "$env:APPDATA\Microsoft\Windows\Recent" "Recent"
+        $copyLog += Copy-Artifact "Windows Event Logs" "$env:WINDIR\System32\winevt\Logs" "EventLogs"
+        $copyLog | Set-Content -Path (Join-Path $temp "12_raw_artifact_copy_log.txt") -Encoding UTF8
+
+        # 13. Package everything into Desktop\AC-FINDINGS
+        $acFolder = Join-Path $desktop "AC-FINDINGS"
+        New-Item -ItemType Directory -Path $acFolder -Force | Out-Null
+
+        $zipPath = Join-Path $acFolder "FINDINGS-$stamp.zip"
+        if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+        }
+
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $temp,
+            $zipPath,
+            [System.IO.Compression.CompressionLevel]::Optimal,
+            $false
+        )
+
+        Remove-Item $temp -Recurse -Force
+        return $zipPath
+    }
+
+    $job = Start-Job -ScriptBlock $collector
+    $spinner = @('|','/','-','\')
+    $i = 0
+
+    while ($job.State -eq 'Running') {
+        Write-Host -NoNewline ("`r  Collecting findings... $($spinner[$i % $spinner.Length])  ")
+        Start-Sleep -Milliseconds 150
+        $i++
+    }
+
+    Write-Host -NoNewline "`r"
+
+    if ($job.State -eq 'Failed') {
+        Write-Host "  Findings collection FAILED." -ForegroundColor Red
+        Receive-Job -Job $job -ErrorAction SilentlyContinue 2>&1 |
+            ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    $zipPath = Receive-Job -Job $job -ErrorAction SilentlyContinue |
+        Where-Object { $_ -is [string] } |
+        Select-Object -Last 1
+
+    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+
+    if (-not $zipPath -or -not (Test-Path $zipPath)) {
+        Write-Host "Findings collection finished, but the ZIP could not be located." -ForegroundColor Red
+        return
+    }
+
+    $zipSizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
+    Write-Host "Findings saved to: $zipPath" -ForegroundColor Green
+    Write-Host "ZIP size: $zipSizeMB MB" -ForegroundColor Green
+}
+
+
+# =========================================================================
+# RUN / MAIN ORCHESTRATION
+# =========================================================================
+Section "Prerequisites"
+Write-Host "Confirm: correct resolution/fps/bitrate, correct capture software, single monitor, taskbar visible." -ForegroundColor $theme.Accent
+if ($tier -eq '3') {
+    Write-Host "Tier 3: start phone recording BEFORE powering on, landscape, all peripherals visible." -ForegroundColor Red
+}
+Pause-ForCamera "Confirm the above before continuing."
+
+# Tier 2/3 keep the original clean-reinstall behavior.
+if ($tier -in @('2', '3')) {
+    $ok = Invoke-RobloxReinstall
+    if (-not $ok) { return }
+    Section "Please complete the Before Launching steps now."
+} else {
+    Write-Host "Tier 1: skipping reinstall. Make sure Roblox is already installed and closed." -ForegroundColor $theme.Accent
+}
+
+Invoke-BeforeLaunching
+Invoke-AfterLaunching
+
+# Preserve the original post-join cleanup + findings collection for Tier 2/3.
+if ($tier -in @('2', '3')) {
+    Invoke-CloseNonEssential
+    Invoke-FindingsCollector
+}
+
+Write-Host ""
+Write-Host "=== TASK MANAGER CHECK ===" -ForegroundColor Magenta
+Write-Host "Before playing, SHOW Task Manager with ALL of the following:" -ForegroundColor Yellow
+Write-Host "1. Right-click Name and enable Process Name and Command Line." -ForegroundColor White
+Write-Host "2. Expand Command Line until Memory Usage reaches the right edge." -ForegroundColor White
+Write-Host "3. Click View and then Expand All (3 dots, top right)." -ForegroundColor White
+Write-Host "4. Scroll to the VERY BOTTOM and ensure EVERY process is visible." -ForegroundColor White
+Write-Host ""
+Write-Host "Do NOT play until Task Manager is configured and visible." -ForegroundColor Red
+Read-Host "Once Task Manager is shown correctly, press Enter to continue"
+
+Write-Host ""
+Write-Host "=== SETUP COMPLETE - YOU MAY NOW PLAY YOUR MATCH ===" -ForegroundColor $theme.Header
+Write-Host "Do NOT close this window (the proxy lock depends on it)." -ForegroundColor Red
+
+$ready = $null
+while ($ready -notmatch '^(y|yes|done)$') {
+    $ready = Read-Host "When your match is completely finished, type DONE to start the end-of-match checks"
+}
+
+Section "After Match Is Finished"
+Invoke-BeforeLaunching -Repeat
+Invoke-AfterLaunching -Repeat
+
+Section "Command Prompt Check"
+Start-Process "cmd.exe" -ArgumentList "/k title Recording-Check"
+Pause-ForCamera "Show your originally-opened Command Prompt, scroll it up and down quickly, then close it."
+
+Section "Removing Proxy Lock"
+$proxyJob = Get-Job -Name "ProxyLock" -ErrorAction SilentlyContinue
+if ($proxyJob) {
+    Stop-Job -Job $proxyJob -ErrorAction SilentlyContinue
+    Remove-Job -Job $proxyJob -Force -ErrorAction SilentlyContinue
+    Write-Host "Stopped proxy lock." -ForegroundColor Green
+}
+netsh winhttp reset proxy
+Pause-ForCamera "Show the 'netsh winhttp reset proxy' command and its output."
+
+if ($tier -in @('2', '3')) {
+    Section "Uploads"
+    $zipDir = "$env:USERPROFILE\Desktop\AC-REC-OUTPUT"
+    if (Test-Path $zipDir) {
+        Start-Process "explorer.exe" -ArgumentList $zipDir
+    }
+    Pause-ForCamera "Upload the ZIP from AC-REC-OUTPUT to 'ow-submissions' while still recording."
+    Pause-ForCamera "End your MOSS session now."
+    Pause-ForCamera "Upload the MOSS file from the 'MOSS' folder to 'ow-submissions' while still recording."
+    Write-Host "You may now stop your recording, then upload it to YouTube and post the link in 'ow-submissions'." -ForegroundColor $theme.Header
+} else {
+    Write-Host "=== TIER 1 CHECKS COMPLETE - YOU MAY NOW STOP YOUR RECORDING ===" -ForegroundColor $theme.Header
+}
