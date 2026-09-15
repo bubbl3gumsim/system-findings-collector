@@ -82,10 +82,19 @@ $menuOptions = @(
     @{ Key = '3'; Label = 'TIER 3'; Desc = 'Tier 2 + Device Manager + phone recording required';             Color = 'Red'    }
 )
 
+function Write-BoxLine($text, $color, $width = 66) {
+    $pad = $width - $text.Length
+    $left = [math]::Floor($pad / 2)
+    $right = $pad - $left
+    Write-Host ("  |" + (" " * $left) + $text + (" " * $right) + "|") -ForegroundColor $color
+}
+
 Write-Host ""
-Write-Host "  +=================================================================+" -ForegroundColor DarkGray
-Write-Host "  |          R O B L O X   A N T I - E X P L O I T   S E T U P        |" -ForegroundColor White
-Write-Host "  +=================================================================+" -ForegroundColor DarkGray
+Write-Host "  +==================================================================+" -ForegroundColor DarkGray
+Write-BoxLine "ARSENAL COMPETITIVE" White 68
+Write-BoxLine "R O B L O X   A N T I - E X P L O I T  S E T U P" Gray 68
+Write-BoxLine "discord.gg/arsenalcomp" DarkCyan 68
+Write-Host "  +==================================================================+" -ForegroundColor DarkGray
 Write-Host ""
 foreach ($opt in $menuOptions) {
     Write-Host ("   [{0}] " -f $opt.Key) -NoNewline -ForegroundColor $opt.Color
@@ -369,90 +378,40 @@ function Invoke-Prerequisites {
 }
 
 # =========================================================================
-# RECORDING SOFTWARE DETECTION
+# RECORDING SOFTWARE SELECTION (manual - process auto-detection was unreliable)
 # =========================================================================
-# Exactly one of OBS / NVIDIA ShadowPlay / AMD Adrenalin is expected. Only the
-# one actually detected gets whitelisted from closure - the other vendors'
-# processes are still fair game.
-$gpuNames  = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
-$hasAMD    = $gpuNames -match 'AMD|Radeon'
-$hasNVIDIA = $gpuNames -match 'NVIDIA|GeForce'
-$hasIntel  = $gpuNames -match 'Intel'
+# Only the family you say you're using gets whitelisted from closure - the
+# other vendors' processes are still fair game for the cleanup stage.
+$gpuNames = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
 
 $recorderFamilies = @{
     "OBS" = @{
-        Detect  = @("obs64", "obs32")
         Whitelist = @("obs64", "obs32", "obs-browser-page", "obs-ffmpeg-mux", "obs-ffmpeg-mux32")
     }
     "NVIDIA" = @{
-        Detect  = @("NVIDIA Share")
         Whitelist = @("NVIDIA Share", "nvcontainer", "NVIDIA Overlay", "NVDisplay.Container")
     }
     "AMD" = @{
-        Detect  = @("RadeonSoftware", "AMDRSServ")
         Whitelist = @("RadeonSoftware", "AMDRSServ", "AMDRSSrcExt")
     }
 }
 
-function Get-ActiveRecorderFamily {
-    $hits = @()
-    foreach ($fam in $recorderFamilies.Keys) {
-        foreach ($p in $recorderFamilies[$fam].Detect) {
-            if (Get-Process -Name $p -ErrorAction SilentlyContinue) {
-                $hits += $fam
-                break
-            }
-        }
-    }
-    return ($hits | Select-Object -Unique)
-}
+function Invoke-RecorderSetup {
+    Section "Recording Software"
 
-function Invoke-RecorderDetection {
-    Section "Recording Software Check"
-
-    $expected = if ($hasNVIDIA) { "NVIDIA (ShadowPlay)" } elseif ($hasAMD) { "AMD (Adrenalin)" } elseif ($hasIntel) { "OBS" } else { "OBS" }
     Write-Host "GPU detected: $($gpuNames -join ', ')" -ForegroundColor Gray
-    Write-Host "Expected recorder for this GPU: $expected" -ForegroundColor Gray
     Write-Host ""
+    Write-Host "OBS, NVIDIA ShadowPlay/Instant Replay, and AMD Adrenalin/ReLive are all" -ForegroundColor Green
+    Write-Host "excluded from the cleanup automatically - no selection or detection needed." -ForegroundColor Green
 
-    $families = @(Get-ActiveRecorderFamily)
+    $global:RecorderFamily = "OBS + NVIDIA + AMD (all excluded)"
+    $global:RecorderWhitelist = @(
+        $recorderFamilies["OBS"].Whitelist +
+        $recorderFamilies["NVIDIA"].Whitelist +
+        $recorderFamilies["AMD"].Whitelist
+    ) | ForEach-Object { $_.ToLower() } | Select-Object -Unique
 
-    while ($families.Count -eq 0) {
-        Write-Host "No recorder detected running (looked for OBS, NVIDIA Share, AMD Adrenalin)." -ForegroundColor Red
-        Write-Host "Start your recorder now." -ForegroundColor Yellow
-        Read-Host "Press Enter once it's running"
-        $families = @(Get-ActiveRecorderFamily)
-    }
-
-    if ($families.Count -gt 1) {
-        Write-Host "MORE THAN ONE recorder is running: $($families -join ', ')" -ForegroundColor Red
-        Write-Host "Only one is permitted. Close the others now." -ForegroundColor Red
-        Read-Host "Press Enter once only one remains"
-        $families = @(Get-ActiveRecorderFamily)
-    }
-
-    $family = $families | Select-Object -First 1
-    Write-Host "Active recorder: $family" -ForegroundColor Green
-
-    # Note: process presence proves the app is OPEN, not that it is ROLLING.
-    Write-Host ""
-    Write-Host "Process detection can't prove you're actually recording - only that the app is open." -ForegroundColor Yellow
-    $ok = $null
-    while ($ok -notmatch '^[Yy]$') {
-        $ok = Read-Host "Look at your recorder - is it actively recording (timer running / REC lit)? (Y)"
-    }
-
-    $names = @()
-    foreach ($p in $recorderFamilies[$family].Whitelist) {
-        if (Get-Process -Name $p -ErrorAction SilentlyContinue) { $names += $p }
-    }
-    # keep the full family list so helper processes spawned later are also spared
-    $global:RecorderFamily = $family
-    $global:RecorderWhitelist = $recorderFamilies[$family].Whitelist | ForEach-Object { $_.ToLower() }
-
-    Write-Host "Whitelisted from closure ($family only): $($global:RecorderWhitelist -join ', ')" -ForegroundColor Green
-    $otherFamilies = $recorderFamilies.Keys | Where-Object { $_ -ne $family }
-    Write-Host "NOT whitelisted (other vendors): $($otherFamilies -join ', ')" -ForegroundColor DarkGray
+    Write-Host "Whitelisted from closure: $($global:RecorderWhitelist -join ', ')" -ForegroundColor Green
 }
 
 # =========================================================================
@@ -1706,6 +1665,9 @@ function Invoke-AfterLaunching([switch]$Repeat) {
 # =========================================================================
 # RUN / MAIN ORCHESTRATION
 # =========================================================================
+Write-Host "IMPORTANT: START YOUR RECORDING NOW, BEFORE GOING ANY FURTHER." -ForegroundColor Red
+Write-Host "This script does not detect your recorder for you - confirm it yourself." -ForegroundColor Red
+Write-Host ""
 Write-Host "IMPORTANT: MAXIMIZE this PowerShell window now and keep it maximized." -ForegroundColor $theme.Header
 if ($tier -in @('2','3')) {
     Write-Host ""
@@ -1727,7 +1689,7 @@ if ($confirm -notmatch '^[Yy]') {
 
 Invoke-ToolCheck
 Invoke-Prerequisites
-Invoke-RecorderDetection
+Invoke-RecorderSetup
 Invoke-MalwarebytesVerification
 
 if ($tier -in @('2','3')) {
