@@ -1867,7 +1867,7 @@ function Step-Autoruns {
     Section "Sysinternals Autoruns"
     $exe = Find-Exe @("autoruns64.exe", "autoruns.exe") $searchDirs
     if ($exe) { Start-Process $exe -Verb RunAs } else { Write-Host "Launch Autoruns manually as Administrator." -ForegroundColor DarkYellow }
-    Pause-ForCamera "Go to the 'Everything' tab, wait for the scan, click Expand All, scroll slowly top to bottom."
+    Pause-ForCamera "Stay in the'Everything' tab, wait for the scan (botton left), when it says 'Ready', scroll slowly top to bottom."
 }
 
 function Step-Moss {
