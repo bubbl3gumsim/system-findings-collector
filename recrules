@@ -262,6 +262,7 @@ $global:MossVerified           = @()
 $global:MossRejected           = @()
 $global:MossWhitelist          = @()
 $global:AbortRun              = $false
+$global:StrapRemoved           = $false
 
 Start-MonitorWatchdog
 
@@ -326,6 +327,196 @@ function Invoke-ToolCheck {
 # =========================================================================
 # GUIDED PREREQUISITES
 # =========================================================================
+function Remove-RobloxStrap($names) {
+    # Kill strap + Roblox, then delete strap folder, uninstall entry and shortcuts.
+    foreach ($n in $names) {
+        Get-Process -Name $n -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+    Get-Process RobloxPlayerBeta, RobloxPlayerLauncher, RobloxCrashHandler -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+
+    $allGone = $true
+    foreach ($n in $names) {
+        $dir = Join-Path $env:LOCALAPPDATA $n
+        if (Test-Path $dir) {
+            try {
+                Remove-Item $dir -Recurse -Force -ErrorAction Stop
+                Write-Host "    Deleted: $dir" -ForegroundColor Green
+            } catch {
+                Write-Host "    Could not delete $dir : $($_.Exception.Message)" -ForegroundColor Red
+                $allGone = $false
+            }
+        }
+        $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$n"
+        if (Test-Path $key) { Remove-Item $key -Recurse -Force -ErrorAction SilentlyContinue }
+        foreach ($d in @("$env:APPDATA\Microsoft\Windows\Start Menu\Programs", [Environment]::GetFolderPath('Desktop'))) {
+            if (Test-Path $d) {
+                Get-ChildItem -Path $d -Filter "$n*.lnk" -Recurse -ErrorAction SilentlyContinue |
+                    Remove-Item -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    return $allGone
+}
+
+$RobloxSettingsTemplate = @'
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+	<External>null</External>
+	<External>nil</External>
+	<Item class="UserGameSettings" referent="RBX24A07F78D1C04EAABF5A304668A9AC97">
+		<Properties>
+			<bool name="AllTutorialsDisabled">false</bool>
+			<bool name="BadgeVisible">true</bool>
+			<token name="CameraMode">0</token>
+			<bool name="CameraYInverted">false</bool>
+			<bool name="ChatTranslationEnabled">true</bool>
+			<bool name="ChatTranslationFTUXShown">true</bool>
+			<string name="ChatTranslationLocale"></string>
+			<bool name="ChatTranslationToggleEnabled">false</bool>
+			<bool name="ChatVisible">true</bool>
+			<string name="CompletedTutorials"></string>
+			<bool name="ComputerCameraMovementChanged">false</bool>
+			<token name="ComputerCameraMovementMode">0</token>
+			<bool name="ComputerMovementChanged">false</bool>
+			<token name="ComputerMovementMode">0</token>
+			<token name="ControlMode">0</token>
+			<string name="DefaultCameraID"></string>
+			<int name="FramerateCap">-1</int>
+			<bool name="Fullscreen">false</bool>
+			<float name="GamepadCameraSensitivity">1</float>
+			<token name="GraphicsOptimizationMode">1</token>
+			<int name="GraphicsQualityLevel">0</int>
+			<float name="HapticStrength">1</float>
+			<bool name="HasEverUsedVR">false</bool>
+			<float name="MasterVolume">1</float>
+			<float name="MasterVolumeStudio">1</float>
+			<bool name="MaxQualityEnabled">false</bool>
+			<bool name="MicroProfilerWebServerEnabled">false</bool>
+			<float name="MouseSensitivity">1</float>
+			<Vector2 name="MouseSensitivityFirstPerson">
+				<X>1</X>
+				<Y>1</Y>
+			</Vector2>
+			<Vector2 name="MouseSensitivityThirdPerson">
+				<X>1</X>
+				<Y>1</Y>
+			</Vector2>
+			<bool name="OnScreenProfilerEnabled">false</bool>
+			<float name="PartyVoiceVolume">1</float>
+			<token name="PeoplePageLayout">0</token>
+			<bool name="PerformanceStatsVisible">false</bool>
+			<float name="PlayerHeight">5.70000029</float>
+			<bool name="PlayerListVisible">true</bool>
+			<bool name="PlayerNamesEnabled">true</bool>
+			<token name="PreferredTextSize">1</token>
+			<float name="PreferredTransparency">1</float>
+			<int name="QualityResetLevel">-1</int>
+			<int name="RCCProfilerRecordFrameRate">0</int>
+			<int name="RCCProfilerRecordTimeFrame">0</int>
+			<bool name="ReadAloud">false</bool>
+			<bool name="ReducedMotion">false</bool>
+			<token name="SavedQualityLevel">0</token>
+			<bool name="StartMaximized">true</bool>
+			<Vector2 name="StartScreenPosition">
+				<X>-8</X>
+				<Y>-8</Y>
+			</Vector2>
+			<Vector2 name="StartScreenSize">
+				<X>1936</X>
+				<Y>1048</Y>
+			</Vector2>
+			<bool name="TouchCameraMovementChanged">false</bool>
+			<token name="TouchCameraMovementMode">0</token>
+			<bool name="TouchMovementChanged">false</bool>
+			<token name="TouchMovementMode">0</token>
+			<bool name="UiNavigationKeyBindEnabled">true</bool>
+			<bool name="UsedCoreGuiIsVisibleToggle">false</bool>
+			<bool name="UsedCustomGuiIsVisibleToggle">false</bool>
+			<bool name="UsedHideHudShortcut">false</bool>
+			<token name="VRComfortSetting">1</token>
+			<bool name="VREnabled">false</bool>
+			<int name="VRRotationIntensity">1</int>
+			<token name="VRSafetyBubbleMode">0</token>
+			<bool name="VRSmoothRotationEnabled">false</bool>
+			<bool name="VRSmoothRotationEnabledCustomOption">false</bool>
+			<bool name="VRThirdPersonFollowCamEnabled">true</bool>
+			<bool name="VRThirdPersonFollowCamEnabledCustomOption">true</bool>
+			<bool name="VignetteEnabled">true</bool>
+			<bool name="VignetteEnabledCustomOption">true</bool>
+			<float name="VoiceChatVolume">1</float>
+			<string name="gaID"></string>
+			<BinaryString name="AttributesSerialize"></BinaryString>
+			<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+			<bool name="DefinesCapabilities">false</bool>
+			<string name="Name">GameSettings</string>
+			<int64 name="SourceAssetId">-1</int64>
+			<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+		</Properties>
+	</Item>
+	<SharedStrings>
+		<SharedString md5="yuZpQdnvvUBOTYh1jqZ2cA=="></SharedString>
+	</SharedStrings>
+</roblox>
+'@
+
+function Invoke-FpsUncap {
+    Section "FPS Uncap"
+    $settingsPath = Join-Path $env:LOCALAPPDATA "Roblox\GlobalBasicSettings_13.xml"
+
+    $ans = $null
+    while ($ans -notmatch '^[YyNn]$') { $ans = Read-Host "Uncap your FPS above 240? (Y/N)" }
+    if ($ans -match '^[Nn]$') { Write-Host "Skipped - FPS cap left at the Roblox default." -ForegroundColor Gray; return }
+
+    # Roblox rewrites this file on exit, so it must be closed while we edit.
+    Get-Process RobloxPlayerBeta, RobloxPlayerLauncher, RobloxCrashHandler -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+
+    $fps = $null
+    while ($null -eq $fps) {
+        $raw = (Read-Host "Enter your FPS cap (whole number above 240), or just press Enter to edit it yourself in Notepad").Trim()
+        if (-not $raw) { break }
+        if ($raw -match '^\d{3,5}$' -and [int]$raw -gt 240) { $fps = [int]$raw }
+        else { Write-Host "  Enter a whole number above 240 (e.g. 360), or leave blank for Notepad." -ForegroundColor Yellow }
+    }
+
+    # A clean reinstall may not have generated the file yet - create it from the default template.
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    if (-not (Test-Path -LiteralPath $settingsPath)) {
+        try {
+            New-Item -ItemType Directory -Path (Split-Path $settingsPath) -Force | Out-Null
+            [System.IO.File]::WriteAllText($settingsPath, ($RobloxSettingsTemplate -replace "`r?`n", "`r`n"), $utf8)
+            Write-Host "Settings file didn't exist yet - created it from the default template." -ForegroundColor DarkYellow
+        } catch {
+            Write-Host "Could not create $settingsPath : $($_.Exception.Message)" -ForegroundColor Red
+            return
+        }
+    }
+
+    if ($null -ne $fps) {
+        $ok = $false
+        try {
+            $xml = [System.IO.File]::ReadAllText($settingsPath)
+            $pattern = '(<int name="FramerateCap">)-?\d+(</int>)'
+            if ($xml -match $pattern) {
+                $new = [regex]::Replace($xml, $pattern, ('${1}' + $fps + '${2}'))
+                [System.IO.File]::WriteAllText($settingsPath, $new, $utf8)
+                $check = [System.IO.File]::ReadAllText($settingsPath)
+                if ($check -match ('<int name="FramerateCap">' + $fps + '</int>')) { $ok = $true }
+            }
+        } catch {}
+        if ($ok) {
+            Write-Host "FramerateCap set to $fps in GlobalBasicSettings_13.xml." -ForegroundColor Green
+            return
+        }
+        Write-Host "Couldn't edit the file automatically - opening it in Notepad instead." -ForegroundColor Yellow
+    }
+
+    Write-Host "Change  <int name=`"FramerateCap`">-1</int>  to your value, save, then close Notepad." -ForegroundColor $theme.Accent
+    Start-Process notepad.exe -ArgumentList ('"' + $settingsPath + '"') -Wait
+}
+
 function Invoke-Prerequisites {
     Section "Prerequisites"
     Write-Host " Your recording must meet ALL of these:" -ForegroundColor $theme.Accent
@@ -358,10 +549,25 @@ function Invoke-Prerequisites {
     if ($strapsFound) {
         Write-Host ""
         Write-Host "  Roblox strap detected: $(($strapsFound | Select-Object -Unique) -join ', ')" -ForegroundColor Red
-        Write-Host "  Straps are banned. Close and uninstall it, reinstall the official Roblox, then re-run." -ForegroundColor Red
-        Stop-MonitorWatchdog
-        $global:AbortRun = $true
-        return
+        Write-Host "  Straps are banned. It must be DELETED to continue (Roblox will be reinstalled clean)." -ForegroundColor Red
+        $del = $null
+        while ($del -notmatch '^[YyNn]$') { $del = Read-Host "  Delete the strap now and continue? (Y/N)" }
+        if ($del -match '^[Nn]$') {
+            Stop-MonitorWatchdog
+            Write-Host "Straps are not allowed - re-run once it's removed. Nothing else was changed." -ForegroundColor Cyan
+            $global:AbortRun = $true
+            return
+        }
+        Write-Host "  Removing strap..." -ForegroundColor Cyan
+        if (Remove-RobloxStrap $strapNames) {
+            $global:StrapRemoved = $true
+            Write-Host "  Strap removed." -ForegroundColor Green
+        } else {
+            Stop-MonitorWatchdog
+            Write-Host "  Couldn't fully remove it - delete the folder(s) above manually, then re-run." -ForegroundColor Red
+            $global:AbortRun = $true
+            return
+        }
     } else {
         Write-Host "  No Roblox strap detected." -ForegroundColor Green
     }
@@ -1000,6 +1206,24 @@ function Invoke-CloseNonEssential {
 # =========================================================================
 # FINDINGS COLLECTOR
 # =========================================================================
+function Show-ReopenWarning {
+    Write-Host ""
+    Write-Host ("!" * 70) -ForegroundColor Red
+    Write-Host " EVERYTHING IS NOW CLOSED. Until you finish playing you may ONLY open:" -ForegroundColor Red
+    if ($tier -eq '2') {
+        Write-Host "     - DISCORD APP" -ForegroundColor White
+        Write-Host "     - BROWSER" -ForegroundColor White
+        Write-Host "     - TASK MANAGER" -ForegroundColor White
+    } else {
+        Write-Host "     - DISCORD APP" -ForegroundColor White
+        Write-Host "     - TASK MANAGER" -ForegroundColor White
+        Write-Host "   Nothing else. Not even a browser." -ForegroundColor Red
+    }
+    Write-Host " Opening ANYTHING else before you finish playing = AUTOMATIC FAIL." -ForegroundColor Red
+    Write-Host ("!" * 70) -ForegroundColor Red
+    Write-Host ""
+}
+
 function Invoke-FindingsCollector {
     Section "Findings Collection"
 
@@ -1539,6 +1763,7 @@ function Invoke-FindingsCollector {
     Write-Host "  >>> COLLECTING FINDINGS - YOU MAY NOW START PLAYING <<<" -ForegroundColor Green
     Write-Host "  Do NOT start your match before this message appears." -ForegroundColor Red
     Write-Host "  Leave this window open until the match is over." -ForegroundColor Red
+    Write-Host "  Reminder: only reopen $(if ($tier -eq '2') { 'DISCORD APP, BROWSER and TASK MANAGER' } else { 'DISCORD APP and TASK MANAGER' }) - anything else = automatic fail." -ForegroundColor Red
     Write-Host ""
 
     $job = Start-Job -ScriptBlock $collector -ArgumentList @(
@@ -1828,9 +2053,11 @@ if ($tier -in @('2','3')) {
     Invoke-MalwarebytesVerification
 }
 
-if ($tier -in @('2','3')) {
+if (($tier -in @('2','3')) -or $global:StrapRemoved) {
+    if ($tier -eq '1') { Write-Host "Strap was removed - the official Roblox must be reinstalled." -ForegroundColor $theme.Accent }
     $ok = Invoke-RobloxReinstall
     if (-not $ok) { Stop-MonitorWatchdog; return }
+    Invoke-FpsUncap
     Section "Please complete the Before Launching steps now."
 } else {
     Write-Host "Tier 1: skipping reinstall. Make sure Roblox is already installed and closed." -ForegroundColor $theme.Accent
@@ -1841,6 +2068,7 @@ Invoke-AfterLaunching
 
 if ($tier -in @('2','3')) {
     Invoke-CloseNonEssential
+    Show-ReopenWarning
     Step-TaskManager -After
     Invoke-FindingsCollector
 }
