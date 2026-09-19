@@ -81,6 +81,14 @@ Write-Host "  ------------------------------------------------------------" -For
 Show-LoadingBar "  Initializing findings collector" $theme.Accent
 Write-Host ""
 
+# Close unnecessary user applications first, using the original AC recording-rules logic.
+function Stop-MonitorWatchdog {
+    try {
+        if ($global:MonitorTimer) { $global:MonitorTimer.Stop(); $global:MonitorTimer.Dispose() }
+        Unregister-Event -SourceIdentifier "MonitorWatch" -ErrorAction SilentlyContinue
+    } catch {}
+}
+
 # These are normally populated by the main recording-rules script.
 # In standalone mode they default to empty, while the collector gathers
 # the machine/system evidence directly.
@@ -675,7 +683,7 @@ function Invoke-FindingsCollector {
 # =========================================================================
 # RUN
 # =========================================================================
-Invoke-FindingsCollector
+Write-Host ""`nWrite-Host "  Closing unnecessary applications..." -ForegroundColor Yellow`nClose-UnnecessaryApps`nWrite-Host "  Application cleanup complete." -ForegroundColor Green`nInvoke-FindingsCollector
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
