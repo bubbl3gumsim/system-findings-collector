@@ -2,32 +2,41 @@
 Clear-Host
 
 # =========================================================================
-# ARSENAL COMPETITIVE — FINDINGS COLLECTOR
+# ADMIN GUARD (works even when run via irm | iex, where #Requires is ignored)
 # =========================================================================
-
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
       ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "Right-click PowerShell and choose 'Run as Administrator', then re-run." -ForegroundColor Red
-    exit 1
+    return
 }
 
-# Fixed theme for the standalone collector.
-$theme = @{
-    Name    = "AC REC"
-    Border  = "Cyan"
-    Header  = "Cyan"
-    Accent  = "Green"
-    Banner  = "DarkCyan"
+# =========================================================================
+# THEME + HELPERS
+# =========================================================================
+$theme = @{ Name = "AC"; Border = "Yellow"; Header = "Yellow"; Accent = "DarkYellow"; Banner = "DarkYellow" }
+
+function Section($title) {
+    Write-Host ""
+    Write-Host ("=" * 70) -ForegroundColor $theme.Border
+    Write-Host " $title" -ForegroundColor $theme.Header
+    Write-Host ("=" * 70) -ForegroundColor $theme.Border
 }
 
-function Write-BoxLine($text, $color, $width = 68) {
-    $pad = $width - $text.Length
-    $left = [math]::Floor($pad / 2)
-    $right = $pad - $left
-    Write-Host ("  |" + (" " * $left) + $text + (" " * $right) + "|") -ForegroundColor $color
+function Pause-ForCamera($msg, $prompt = "Press Enter once this is shown on your recording") {
+    Write-Host $msg -ForegroundColor $theme.Accent
+    Read-Host $prompt
 }
 
-function Write-Typewriter($text, $color, $delayMs = 5) {
+function Get-SizeMB($path) {
+    try {
+        if ($path -and (Test-Path -LiteralPath $path)) {
+            return [math]::Round((Get-Item -LiteralPath $path -ErrorAction Stop).Length / 1MB, 3)
+        }
+    } catch {}
+    return $null
+}
+
+function Write-Typewriter($text, $color, $delayMs = 6) {
     foreach ($ch in $text.ToCharArray()) {
         Write-Host -NoNewline $ch -ForegroundColor $color
         Start-Sleep -Milliseconds $delayMs
@@ -45,14 +54,25 @@ function Show-LoadingBar($label, $color, $steps = 24, $delayMs = 20) {
     Write-Host "] READY" -ForegroundColor $color
 }
 
-function Section($title) {
-    Write-Host ""
-    Write-Host ("=" * 70) -ForegroundColor $theme.Border
-    Write-Host " $title" -ForegroundColor $theme.Header
-    Write-Host ("=" * 70) -ForegroundColor $theme.Border
+function Write-BoxLine($text, $color, $width = 66) {
+    $pad = $width - $text.Length
+    $left = [math]::Floor($pad / 2)
+    $right = $pad - $left
+    Write-Host ("  |" + (" " * $left) + $text + (" " * $right) + "|") -ForegroundColor $color
 }
 
-# Same AC recording-rules banner/branding as the original script.
+function Get-ActiveDisplayCount {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+        $n = [System.Windows.Forms.Screen]::AllScreens.Count
+        if ($n -ge 1) { return $n }
+    } catch {}
+    return 1
+}
+
+# =========================================================================
+# HEADER
+# =========================================================================
 Write-Host ""
 Write-Host "  +==================================================================+" -ForegroundColor DarkGray
 Write-BoxLine "ARSENAL COMPETITIVE" White 68
@@ -68,40 +88,530 @@ $banner = @"
  / ___ \ |___   |  _ <| |__| |__| |_| |  _ <| |_| | || |\  | |_| |
 /_/   \_\____|  |_| \_\_____\____\___/|_| \_\____/___|_| \_|\____|
 
-                       A C   R E C   R U L E S
+                 A C   R E C   R U L E S
 "@
 
 foreach ($line in ($banner -split "`n")) {
     Write-Host $line -ForegroundColor $theme.Banner
-    Start-Sleep -Milliseconds 20
+    Start-Sleep -Milliseconds 25
 }
 Write-Host ""
-Write-Typewriter "  Findings Collection" DarkGray 5
+Write-Typewriter "  Process Cleanup + Findings Collection" DarkGray 5
 Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
-Show-LoadingBar "  Initializing findings collector" $theme.Accent
+Show-LoadingBar "  Initializing cleanup protocols" $theme.Accent
 Write-Host ""
 
-# Close unnecessary user applications first, using the original AC recording-rules logic.
-function Stop-MonitorWatchdog {
-    try {
-        if ($global:MonitorTimer) { $global:MonitorTimer.Stop(); $global:MonitorTimer.Dispose() }
-        Unregister-Event -SourceIdentifier "MonitorWatch" -ErrorAction SilentlyContinue
-    } catch {}
+# Globals
+$global:justifiedExtras        = @()
+$global:RecorderFamily         = "OBS + NVIDIA + AMD (all excluded)"
+$global:RecorderWhitelist      = @()
+$global:MalwarebytesVerified   = @()
+$global:MalwarebytesRejected   = @()
+$global:MalwarebytesWhitelist  = @()
+$global:ExcludedReport         = @()
+$global:DuplicateReport        = @()
+$global:CloseLog               = @()
+$global:MossVerified           = @()
+$global:MossRejected           = @()
+$global:MossWhitelist          = @()
+$global:CimPathMap             = @{}
+
+# =========================================================================
+# RECORDER WHITELIST
+# =========================================================================
+$gpuNames = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+
+$recorderFamilies = @{
+    "OBS"    = @{ Whitelist = @("obs64", "obs32", "obs-browser-page", "obs-ffmpeg-mux", "obs-ffmpeg-mux32") }
+    "NVIDIA" = @{ Whitelist = @("NVIDIA Share", "nvcontainer", "NVIDIA Overlay", "NVDisplay.Container", "nvsphelper64", "NVIDIA Broadcast", "GFExperienceService", "NVIDIA GeForce Experience") }
+    "AMD"    = @{ Whitelist = @("RadeonSoftware", "AMDRSServ", "AMDRSSrcExt", "RadeonRelive") }
 }
 
-# These are normally populated by the main recording-rules script.
-# In standalone mode they default to empty, while the collector gathers
-# the machine/system evidence directly.
-$global:ExcludedReport       = @()
-$global:CloseLog             = @()
-$global:DuplicateReport      = @()
-$global:MonitorLog           = @()
-$global:MalwarebytesVerified = @()
-$global:MalwarebytesRejected = @()
-$global:RecorderFamily       = "Standalone findings collector"
-$global:MossVerified         = @()
-$global:MossRejected         = @()
+$global:RecorderWhitelist = @(
+    $recorderFamilies["OBS"].Whitelist +
+    $recorderFamilies["NVIDIA"].Whitelist +
+    $recorderFamilies["AMD"].Whitelist
+) | ForEach-Object { $_.ToLower() } | Select-Object -Unique
 
+$RecorderPathTokens = @(
+    "\NVIDIA Corporation\",
+    "\AMD\",
+    "\ATI Technologies\",
+    "\ATI\",
+    "\DriverStore\FileRepository\nv_"
+)
+
+function Get-ProcPathSafe($p) {
+    if ($global:CimPathMap -and $global:CimPathMap.ContainsKey([int]$p.Id)) {
+        $cached = $global:CimPathMap[[int]$p.Id]
+        if ($cached) { return $cached }
+    }
+    try { $path = $p.Path; if ($path) { return $path } } catch {}
+    try {
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $($p.Id)" -ErrorAction Stop
+        if ($cim -and $cim.ExecutablePath) { return $cim.ExecutablePath }
+    } catch {}
+    return $null
+}
+
+function Test-IsRecorderPath($path) {
+    if (-not $path) { return $false }
+    foreach ($tok in $RecorderPathTokens) {
+        if ($path -like "*$tok*") { return $true }
+    }
+    try {
+        if (Test-Path -LiteralPath $path) {
+            $company = (Get-Item -LiteralPath $path -ErrorAction Stop).VersionInfo.CompanyName
+            if ($company -match 'NVIDIA|Advanced Micro Devices|AMD Inc') { return $true }
+        }
+    } catch {}
+    return $false
+}
+
+# =========================================================================
+# MALWAREBYTES VERIFICATION
+# =========================================================================
+$MalwarebytesProcessNames = @(
+    "MBAMService", "MBAMWsc", "Malwarebytes", "MBAM", "mbamtray",
+    "MbamBgNativeMsg", "MBAMCrashHandler", "MBAMInstallerService",
+    "MBVpnTunnelService", "DDSHelper", "MbamPt", "malwarebytes_assistant",
+    "assistant", "ig", "mbuns", "mb5uns", "mbupdatrV5"
+)
+
+$MalwarebytesOfficialDirs = @(
+    "$env:ProgramFiles\Malwarebytes",
+    "${env:ProgramFiles(x86)}\Malwarebytes",
+    "$env:ProgramData\Malwarebytes"
+)
+
+$MalwarebytesKnownHashes = @{
+    "D2257E7643128166F46A88DA45AB9C38B7C23D0D727551DBD9F780A43F4ABD11" = "DDSHelper.exe"
+    "4CC90A8B3AEB8D972F7F6897E17D874732599EAEF6BB63ED093D2A68A4C0DB70" = "MBAM.exe / Malwarebytes.exe"
+    "164932EA0EAD0FC1D660B075913244FE7CA7322C725CDB0903AE4CF217B19A64" = "MBAMCrashHandler.exe"
+    "5BEFD103CA4BF84732CC2FBF5B3A8638CE62DF5730A8FFE5E72165A930CB65CC" = "MBAMInstallerService.exe"
+    "8A639583E24E9ED319D69D08A4027CCBE4FC686E765E504FBC72B7D00C521D3B" = "MBAMService.exe"
+    "7878A9B10903B8C0DEF49015DEEFD48A3EA0E46C0F5AC9AE755336994E020152" = "MBAMWsc.exe"
+    "A67F94A3014D93B9B91F0C8427C81CC18CB13239A114D91C51F993702E60A580" = "MBVpnTunnelService.exe"
+    "470A0254BC323F229DFBA24E3AB3EB0C23A3491F5ACC4E90E45D8095CFDCA639" = "MbamBgNativeMsg.exe"
+    "D0D9CA61272BF503B2B49C20C36C34F9EA84238088F86067A0ED913F40F5CCC5" = "MbamPt.exe"
+    "61ADC7DAB1A2582117FDCCDE0D27ED01704CE6534C8348FC6CC3B83E6ED7BF70" = "assistant.exe"
+    "C3913062DC7CD67B009244DB4ACD7A265FC2116515ADB7D7A4C77BFA50C44433" = "ig.exe"
+    "D37A6A87F109CCBC4868BA7090976B8B56E2DFB850A2B4C3F7CEEF2F213915CA" = "malwarebytes_assistant.exe"
+    "F7EE321B7C594CF9BFB980B574561F1F017E998A733BD7221E74D860A0963407" = "mb5uns.exe"
+    "34FF8A8822B1F4278CAFA469CD77C7FF663494B613096DECC5A5791E7B86A335" = "mbuns.exe"
+    "68A6DCF6BABA7FD817823B3AFA78F758E0275F36A79D11E813DD8DF5E63241C1" = "mbupdatrV5.exe"
+}
+
+function Test-GenuineMalwarebytes($proc) {
+    $result = [PSCustomObject]@{
+        Name = $proc.ProcessName; PID = $proc.Id; Path = $null; SizeMB = $null
+        InOfficialDir = $false; SignatureOK = $false; PublisherOK = $false
+        Publisher = $null; SHA256 = $null; KnownBuild = $false; Genuine = $false; Reason = @()
+    }
+
+    try { $result.Path = $proc.Path } catch { $result.Path = $null }
+    if (-not $result.Path) { $result.Reason += "executable path unavailable"; return $result }
+
+    $result.SizeMB = Get-SizeMB $result.Path
+
+    foreach ($dir in $MalwarebytesOfficialDirs) {
+        if ($dir -and $result.Path.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase)) {
+            $result.InOfficialDir = $true; break
+        }
+    }
+    if (-not $result.InOfficialDir) { $result.Reason += "not in official Malwarebytes install directory" }
+
+    try {
+        $sig = Get-AuthenticodeSignature -FilePath $result.Path -ErrorAction Stop
+        $result.SignatureOK = ($sig.Status -eq "Valid")
+        if ($sig.SignerCertificate) { $result.Publisher = $sig.SignerCertificate.Subject }
+        if (-not $result.SignatureOK) { $result.Reason += "signature status: $($sig.Status)" }
+        if ($result.Publisher -and $result.Publisher -match 'Malwarebytes') { $result.PublisherOK = $true }
+        else { $result.Reason += "signing publisher is not Malwarebytes" }
+    } catch { $result.Reason += "signature could not be read" }
+
+    try {
+        $result.SHA256 = (Get-FileHash -Path $result.Path -Algorithm SHA256 -ErrorAction Stop).Hash
+        if ($MalwarebytesKnownHashes.ContainsKey($result.SHA256)) { $result.KnownBuild = $true }
+    } catch {}
+
+    $result.Genuine = ($result.InOfficialDir -and $result.SignatureOK -and $result.PublisherOK)
+    if ($result.Genuine -and $result.Reason.Count -eq 0) { $result.Reason += "verified genuine" }
+    return $result
+}
+
+function Invoke-MalwarebytesVerification {
+    Section "Malwarebytes Integrity Verification"
+
+    $candidates = @()
+    foreach ($n in $MalwarebytesProcessNames) { $candidates += Get-Process -Name $n -ErrorAction SilentlyContinue }
+    $candidates = $candidates | Sort-Object Id -Unique
+
+    $global:MalwarebytesVerified = @()
+    $global:MalwarebytesRejected = @()
+
+    if (-not $candidates) {
+        Write-Host "No Malwarebytes processes are currently running." -ForegroundColor DarkYellow
+        Write-Host "Start Malwarebytes before continuing - it must stay running." -ForegroundColor Yellow
+        Read-Host "Press Enter once Malwarebytes is running"
+        foreach ($n in $MalwarebytesProcessNames) { $candidates += Get-Process -Name $n -ErrorAction SilentlyContinue }
+        $candidates = $candidates | Sort-Object Id -Unique
+    }
+
+    foreach ($proc in $candidates) {
+        $v = Test-GenuineMalwarebytes $proc
+        if ($v.Genuine) {
+            $global:MalwarebytesVerified += $v
+            $tag = if ($v.KnownBuild) { "verified + known build" } else { "verified (build not on file)" }
+            Write-Host ("  OK    {0,-24} PID {1,-7} {2} MB  [{3}]" -f $v.Name, $v.PID, $v.SizeMB, $tag) -ForegroundColor Green
+        } else {
+            $global:MalwarebytesRejected += $v
+            Write-Host ("  FAIL  {0,-24} PID {1,-7} {2}" -f $v.Name, $v.PID, ($v.Reason -join "; ")) -ForegroundColor Red
+            Write-Host ("        path: {0}" -f $v.Path) -ForegroundColor Red
+        }
+    }
+
+    $global:MalwarebytesWhitelist = @($global:MalwarebytesVerified | ForEach-Object { $_.Name.ToLower() } | Select-Object -Unique)
+
+    Write-Host ""
+    if ($global:MalwarebytesRejected.Count -gt 0) {
+        Write-Host "WARNING: $($global:MalwarebytesRejected.Count) process(es) named like Malwarebytes failed verification." -ForegroundColor Red
+        Write-Host "They will NOT be excluded from closing and are flagged in the report." -ForegroundColor Red
+    }
+    Write-Host "Verified Malwarebytes components excluded from closing: $($global:MalwarebytesWhitelist.Count)" -ForegroundColor Green
+}
+
+# =========================================================================
+# MOSS VERIFICATION (must keep running the whole match)
+# =========================================================================
+$MossProcessNames  = @("MOSS", "MOSSX64", "MossX645", "MOSSCapture")
+$MossKnownFileName = "MossX64.exe"
+$MossKnownSize     = 4220416
+$MossKnownZipSha   = "814824D4C279772A05C8A2E35E8F1E09B2CE4CBD682583A16A8E04F7D5E67637"
+$MossKnownHashes   = @(
+    # "PASTE_SHA256_OF_MossX64.exe_HERE"
+)
+
+function Test-GenuineMoss($proc) {
+    $r = [PSCustomObject]@{
+        Name = $proc.ProcessName; PID = $proc.Id; Path = $null; SizeBytes = $null; SizeMB = $null
+        FileName = $null; NameOK = $false; SizeOK = $false; SignatureStatus = $null
+        Publisher = $null; SHA256 = $null; KnownBuild = $false; Genuine = $false; Reason = @()
+    }
+
+    try { $r.Path = $proc.Path } catch {}
+    if (-not $r.Path) { $r.Reason += "executable path unavailable"; return $r }
+
+    try {
+        $fi = Get-Item -LiteralPath $r.Path -ErrorAction Stop
+        $r.SizeBytes = $fi.Length
+        $r.SizeMB    = [math]::Round($fi.Length / 1MB, 3)
+        $r.FileName  = $fi.Name
+    } catch { $r.Reason += "could not stat file"; return $r }
+
+    $r.NameOK = ($r.FileName -ieq $MossKnownFileName)
+    if (-not $r.NameOK) { $r.Reason += "filename '$($r.FileName)' is not $MossKnownFileName" }
+
+    $r.SizeOK = ($r.SizeBytes -eq $MossKnownSize)
+    if (-not $r.SizeOK) { $r.Reason += "size $($r.SizeBytes) bytes != official $MossKnownSize bytes" }
+
+    try {
+        $sig = Get-AuthenticodeSignature -FilePath $r.Path -ErrorAction Stop
+        $r.SignatureStatus = $sig.Status
+        if ($sig.SignerCertificate) { $r.Publisher = $sig.SignerCertificate.Subject }
+    } catch { $r.SignatureStatus = "unreadable" }
+
+    try { $r.SHA256 = (Get-FileHash -Path $r.Path -Algorithm SHA256 -ErrorAction Stop).Hash } catch {}
+
+    if ($MossKnownHashes.Count -gt 0) {
+        $r.KnownBuild = ($MossKnownHashes -contains $r.SHA256)
+        $r.Genuine    = $r.KnownBuild
+        if (-not $r.KnownBuild) { $r.Reason += "SHA256 does not match any known-good MOSS build" }
+    } else {
+        $r.Genuine = ($r.NameOK -and $r.SizeOK)
+        $r.Reason += "no MOSS hash on file - verified by name+size only (weaker)"
+    }
+    return $r
+}
+
+function Invoke-MossVerification {
+    Section "MOSS Integrity Verification"
+
+    $candidates = @()
+    foreach ($n in $MossProcessNames) { $candidates += Get-Process -Name $n -ErrorAction SilentlyContinue }
+    $candidates = $candidates | Sort-Object Id -Unique
+
+    $global:MossVerified = @()
+    $global:MossRejected = @()
+
+    if (-not $candidates) {
+        Write-Host "MOSS is NOT running. It must be running for the whole match." -ForegroundColor Red
+        Write-Host "Start MOSS (File > Parameters > Pick Roblox > OK > Capture > Start), then press Enter." -ForegroundColor Yellow
+        Read-Host "Press Enter once MOSS is running (or to continue without it)"
+        foreach ($n in $MossProcessNames) { $candidates += Get-Process -Name $n -ErrorAction SilentlyContinue }
+        $candidates = $candidates | Sort-Object Id -Unique
+    }
+
+    if (-not $candidates) {
+        Write-Host "Still no MOSS process found - continuing without a MOSS exclusion." -ForegroundColor DarkYellow
+        $global:MossWhitelist = @()
+        return
+    }
+
+    if ($MossKnownHashes.Count -eq 0) {
+        Write-Host "NOTE: no MOSS SHA256 on file (official zip is encrypted)." -ForegroundColor DarkYellow
+        Write-Host "      Falling back to filename + exact byte size. This is weaker than a hash check." -ForegroundColor DarkYellow
+        Write-Host ""
+    }
+
+    foreach ($proc in $candidates) {
+        $v = Test-GenuineMoss $proc
+        if ($v.Genuine) {
+            $global:MossVerified += $v
+            Write-Host ("  OK    {0,-24} PID {1,-7} {2} MB  sig={3}" -f $v.Name, $v.PID, $v.SizeMB, $v.SignatureStatus) -ForegroundColor Green
+            Write-Host ("        sha256: {0}" -f $v.SHA256) -ForegroundColor DarkGray
+        } else {
+            $global:MossRejected += $v
+            Write-Host ("  FAIL  {0,-24} PID {1,-7} {2}" -f $v.Name, $v.PID, ($v.Reason -join "; ")) -ForegroundColor Red
+            Write-Host ("        path: {0}" -f $v.Path) -ForegroundColor Red
+        }
+    }
+
+    $global:MossWhitelist = @($global:MossVerified | ForEach-Object { $_.Name.ToLower() } | Select-Object -Unique)
+
+    Write-Host ""
+    if ($global:MossRejected.Count -gt 0) {
+        Write-Host "WARNING: $($global:MossRejected.Count) process(es) named like MOSS failed verification." -ForegroundColor Red
+        Write-Host "They will NOT be excluded from closing and are flagged in the report." -ForegroundColor Red
+    }
+    Write-Host "Verified MOSS components excluded from closing: $($global:MossWhitelist.Count)" -ForegroundColor Green
+}
+
+# =========================================================================
+# CLOSE NON-ESSENTIAL PROCESSES
+# =========================================================================
+function Invoke-CloseNonEssential {
+    Section "Close Non-Essential Processes"
+
+    $systemWhitelist = @(
+        "System","Idle","Registry","smss","csrss","wininit","winlogon","services","lsass","lsm",
+        "svchost","dwm","explorer","fontdrvhost","RuntimeBroker","sihost","taskhostw","ctfmon",
+        "conhost","dllhost","WUDFHost","SearchIndexer","SearchHost","StartMenuExperienceHost",
+        "ShellExperienceHost","ApplicationFrameHost","TextInputHost","spoolsv","audiodg",
+        "powershell","pwsh","WindowsTerminal","OpenConsole","cmd","netsh","Secure System","Memory Compression"
+    )
+    $robloxWhitelist = @("RobloxPlayerBeta","RobloxPlayerLauncher","RobloxCrashHandler")
+
+    $whitelistMap = @{}
+    foreach ($n in $systemWhitelist)              { $whitelistMap[$n.ToLower()] = "core Windows process" }
+    foreach ($n in $robloxWhitelist)              { $whitelistMap[$n.ToLower()] = "Roblox (the game being recorded)" }
+    foreach ($n in $global:RecorderWhitelist)     { $whitelistMap[$n.ToLower()] = "recording software ($global:RecorderFamily)" }
+    foreach ($n in $global:MalwarebytesWhitelist) { $whitelistMap[$n.ToLower()] = "Malwarebytes (signature-verified)" }
+    foreach ($n in $global:MossWhitelist)         { $whitelistMap[$n.ToLower()] = "MOSS (must run for whole match)" }
+    foreach ($n in @($global:justifiedExtras))    { if ($n) { $whitelistMap[$n.ToLower()] = "user-justified on camera" } }
+
+    $allProcs = @(Get-Process | Sort-Object ProcessName, Id)
+    $selfPid  = $PID
+
+    $global:CimPathMap = @{}
+    try {
+        Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
+            if ($_.ExecutablePath) { $global:CimPathMap[[int]$_.ProcessId] = $_.ExecutablePath }
+        }
+    } catch {}
+
+    # ---- duplicates ----
+    $dupGroups = $allProcs | Group-Object ProcessName | Where-Object { $_.Count -gt 1 }
+    $global:DuplicateReport = @()
+    foreach ($g in $dupGroups) {
+        foreach ($p in $g.Group) {
+            $path = Get-ProcPathSafe $p
+            $st = $null; try { $st = $p.StartTime } catch {}
+            $global:DuplicateReport += [PSCustomObject]@{
+                Name = $g.Name; InstanceCount = $g.Count; PID = $p.Id; Path = $path
+                SizeMB = Get-SizeMB $path; StartTime = $st
+                Whitelisted = $whitelistMap.ContainsKey($g.Name.ToLower())
+            }
+        }
+    }
+    if ($dupGroups) {
+        Write-Host "Processes running with MULTIPLE instances:" -ForegroundColor Yellow
+        foreach ($g in $dupGroups) {
+            Write-Host ("  {0,-28} x{1}  (PIDs: {2})" -f $g.Name, $g.Count, (($g.Group | ForEach-Object { $_.Id }) -join ', ')) -ForegroundColor Yellow
+        }
+        Write-Host ""
+    }
+
+    # ---- excluded list ----
+    $global:ExcludedReport = @()
+    foreach ($p in $allProcs) {
+        $key = $p.ProcessName.ToLower()
+        $path = Get-ProcPathSafe $p
+        $isRecorderPath = Test-IsRecorderPath $path
+        if ($whitelistMap.ContainsKey($key) -or $isRecorderPath -or $p.Id -eq $selfPid) {
+            $signed = $null; $publisher = $null
+            if ($path) {
+                try {
+                    $sig = Get-AuthenticodeSignature -FilePath $path -ErrorAction Stop
+                    $signed = $sig.Status
+                    if ($sig.SignerCertificate) { $publisher = $sig.SignerCertificate.Subject }
+                } catch { $signed = "unreadable" }
+            }
+            $reason =
+                if ($p.Id -eq $selfPid) { "this script's own PowerShell process" }
+                elseif ($whitelistMap.ContainsKey($key)) { $whitelistMap[$key] }
+                else { "recording software (running from vendor install directory: $path)" }
+            $global:ExcludedReport += [PSCustomObject]@{
+                Name = $p.ProcessName; PID = $p.Id; Path = $path; SizeMB = Get-SizeMB $path
+                Signature = $signed; Publisher = $publisher; Reason = $reason
+            }
+        }
+    }
+
+    $candidates = @($allProcs | Where-Object {
+        $path = Get-ProcPathSafe $_
+        $_.Id -ne $selfPid -and
+        (-not $whitelistMap.ContainsKey($_.ProcessName.ToLower())) -and
+        (-not (Test-IsRecorderPath $path))
+    })
+
+    if (-not $candidates) {
+        Write-Host "Nothing to close - only excluded processes are running." -ForegroundColor Gray
+        $global:CloseLog = @()
+        return
+    }
+
+    Write-Host "Found $($candidates.Count) non-essential process(es). Closing..." -ForegroundColor Cyan
+    Write-Host ""
+
+    $log = @()
+
+    foreach ($proc in $candidates) {
+        $path = $null; $signed = $null; $publisher = $null
+        $suspicious = $false; $reason = @(); $status = "Unknown"; $startTime = $null
+
+        try { $path = $proc.Path } catch { $path = $null }
+        if (-not $path) { $path = Get-ProcPathSafe $proc }
+        try { $startTime = $proc.StartTime } catch {}
+        $sizeMB = Get-SizeMB $path
+
+        if ($path) {
+            try {
+                $sig = Get-AuthenticodeSignature -FilePath $path -ErrorAction Stop
+                $signed = ($sig.Status -eq "Valid")
+                if ($sig.SignerCertificate) { $publisher = $sig.SignerCertificate.Subject }
+            } catch { $signed = $false }
+
+            if (-not $signed) { $suspicious = $true; $reason += "unsigned or invalid signature" }
+            if ($path -match '\\(Temp|Downloads|AppData\\Local\\Temp)\\') {
+                $suspicious = $true; $reason += "running from a temp/downloads folder"
+            }
+            if ($MalwarebytesProcessNames -contains $proc.ProcessName) {
+                $suspicious = $true; $reason += "named like Malwarebytes but FAILED verification"
+            }
+            if ($MossProcessNames -contains $proc.ProcessName) {
+                $suspicious = $true; $reason += "named like MOSS but FAILED verification"
+            }
+        } else {
+            $reason += "path unavailable"
+        }
+
+        try {
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            $status = "Closed"
+        } catch {
+            try {
+                $servicesForPid = Get-CimInstance Win32_Service -Filter "ProcessId = $($proc.Id)" -ErrorAction Stop
+                if ($servicesForPid) {
+                    $stoppedServiceNames = @()
+                    foreach ($svc in $servicesForPid) {
+                        try {
+                            $service = Get-Service -Name $svc.Name -ErrorAction Stop
+                            if ($service.Status -ne "Stopped") {
+                                Stop-Service -Name $svc.Name -Force -ErrorAction Stop
+                                $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(10))
+                            }
+                            $stoppedServiceNames += $svc.Name
+                        } catch { }
+                    }
+                    Start-Sleep -Milliseconds 500
+                    if (-not (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue)) {
+                        if ($stoppedServiceNames.Count -gt 0) { $status = "Closed (service stopped: $($stoppedServiceNames -join ', '))" }
+                        else { $status = "Service found, but could not be stopped" }
+                    } else {
+                        try {
+                            $tkOut = & taskkill /F /PID $proc.Id 2>&1
+                            if ($LASTEXITCODE -eq 0) { $status = "Closed (service stopped + taskkill)" }
+                            else { $status = "Failed to close: $tkOut" }
+                        } catch { $status = "Failed to close: $($_.Exception.Message)" }
+                    }
+                } else {
+                    try {
+                        $tkOut = & taskkill /F /PID $proc.Id 2>&1
+                        if ($LASTEXITCODE -eq 0) { $status = "Closed (via taskkill fallback)" }
+                        else { $status = "Failed to close: $tkOut" }
+                    } catch { $status = "Failed to close: $($_.Exception.Message)" }
+                }
+            } catch { $status = "Failed to close: $($_.Exception.Message)" }
+        }
+
+        $log += [PSCustomObject]@{
+            Name = $proc.ProcessName; PID = $proc.Id; Path = $path; SizeMB = $sizeMB
+            Signed = $signed; Publisher = $publisher; StartTime = $startTime
+            Suspicious = $suspicious; Notes = ($reason -join "; "); Status = $status
+        }
+
+        $color = if ($suspicious) { "Red" } elseif ($status -like "Closed*") { "Green" } elseif ($status -like "Failed*") { "DarkYellow" } else { "Gray" }
+        Write-Host ("{0,-25} PID {1,-7} {2,-9} {3}" -f $proc.ProcessName, $proc.Id, "$sizeMB MB", $status) -ForegroundColor $color
+    }
+
+    $global:CloseLog = $log
+
+    Write-Host ""
+    $suspiciousCount = @($log | Where-Object { $_.Suspicious }).Count
+    $closedCount     = @($log | Where-Object { $_.Status -like "Closed*" }).Count
+    $failedCount     = @($log | Where-Object { $_.Status -notlike "Closed*" }).Count
+
+    Write-Host "Closed $closedCount of $($candidates.Count); $failedCount could not be closed; $suspiciousCount flagged." -ForegroundColor Green
+
+    if ($failedCount -gt 0) {
+        Write-Host ""
+        Write-Host "Could NOT be closed (these stay running - explain them on camera):" -ForegroundColor DarkYellow
+        $log | Where-Object { $_.Status -notlike "Closed*" } | ForEach-Object {
+            Write-Host ("  {0} (PID {1}) {2} MB - {3}" -f $_.Name, $_.PID, $_.SizeMB, $_.Path) -ForegroundColor DarkYellow
+        }
+    }
+
+    if ($suspiciousCount -gt 0) {
+        Write-Host ""
+        Write-Host "Flagged processes:" -ForegroundColor Red
+        $log | Where-Object { $_.Suspicious } | ForEach-Object {
+            Write-Host ("  {0} (PID {1}) {2} MB - {3}" -f $_.Name, $_.PID, $_.SizeMB, $_.Path) -ForegroundColor Red
+            Write-Host ("    Reason: {0}" -f $_.Notes) -ForegroundColor Red
+        }
+        Write-Host ""
+        Write-Host "A flag is not proof of malicious activity; some legitimate tools are unsigned." -ForegroundColor Yellow
+    }
+}
+
+# =========================================================================
+# TASK MANAGER STEP
+# =========================================================================
+function Step-TaskManager {
+    Section "Task Manager"
+    Start-Process "taskmgr.exe"
+    Write-Host "Configure Task Manager exactly like this:" -ForegroundColor Yellow
+    Write-Host "  1. Right-click the Name column header and enable Process Name AND Command Line." -ForegroundColor White
+    Write-Host "  2. Drag the Command Line column wider until Disk and Network are pushed OFF screen." -ForegroundColor White
+    Write-Host "     CPU and Memory MUST still be visible - do not push those off." -ForegroundColor Red
+    Write-Host "  3. View > Expand All (3 dots, top right)." -ForegroundColor White
+    Write-Host "  4. Scroll to the VERY BOTTOM so every process is shown." -ForegroundColor White
+    Pause-ForCamera "Show Task Manager with Command Line wide, Disk/Network hidden, CPU + Memory visible."
+}
+
+# =========================================================================
+# FINDINGS COLLECTOR
+# =========================================================================
 function Invoke-FindingsCollector {
     Section "Findings Collection"
 
@@ -115,11 +625,8 @@ function Invoke-FindingsCollector {
 
         function Save($name, $scriptblock) {
             $path = Join-Path $temp "$name.txt"
-            try {
-                (& $scriptblock) | Out-String -Width 500 | Set-Content -Path $path -Encoding UTF8
-            } catch {
-                "ERROR: $_" | Set-Content -Path $path -Encoding UTF8
-            }
+            try { (& $scriptblock) | Out-String -Width 500 | Set-Content -Path $path -Encoding UTF8 }
+            catch { "ERROR: $_" | Set-Content -Path $path -Encoding UTF8 }
         }
 
         function SaveCsv($name, $data) {
@@ -135,7 +642,6 @@ function Invoke-FindingsCollector {
             return $null
         }
 
-        # ---- 01 process parentage, with size ----
         Save "01_process_parentage" {
             $parentMap = @{}
             Get-Process | ForEach-Object { $parentMap[$_.Id] = $_.Name }
@@ -145,71 +651,47 @@ function Invoke-FindingsCollector {
                 ExecutablePath, CommandLine
         }
 
-        # ---- 02 full process detail ----
         Save "02_process_details" {
             Get-CimInstance Win32_Process | ForEach-Object {
                 [PSCustomObject]@{
-                    ProcessId      = $_.ProcessId
-                    Name           = $_.Name
-                    ExecutablePath = $_.ExecutablePath
-                    SizeMB         = SizeMB $_.ExecutablePath
-                    WorkingSetMB   = [math]::Round($_.WorkingSetSize / 1MB, 2)
-                    CommandLine    = $_.CommandLine
+                    ProcessId = $_.ProcessId; Name = $_.Name; ExecutablePath = $_.ExecutablePath
+                    SizeMB = SizeMB $_.ExecutablePath
+                    WorkingSetMB = [math]::Round($_.WorkingSetSize / 1MB, 2)
+                    CommandLine = $_.CommandLine
                 }
             } | Format-List
         }
 
-        # ---- 03 virtualization / system info ----
         Save "03_systeminfo_virtualization" { systeminfo | findstr /i "hyper os version page virtualization boot" }
-
-        # ---- 04 scheduled tasks ----
         Save "04_scheduled_tasks" { Get-ScheduledTask | Select-Object TaskPath, TaskName, State, Author }
-
-        # ---- 05 tasklist ----
         Save "05_tasklist" { tasklist /v }
 
-        # ---- 06 process start times ----
         Save "06_process_starttimes" {
             Get-Process | ForEach-Object {
                 $p = $null; try { $p = $_.Path } catch {}
                 $st = $null; try { $st = $_.StartTime } catch {}
-                [PSCustomObject]@{
-                    Name      = $_.Name
-                    PID       = $_.Id
-                    StartTime = $st
-                    SizeMB    = SizeMB $p
-                    Path      = $p
-                }
+                [PSCustomObject]@{ Name = $_.Name; PID = $_.Id; StartTime = $st; SizeMB = SizeMB $p; Path = $p }
             } | Sort-Object StartTime -Descending
         }
 
-        # ---- 07 all services with binary path + size ----
         Save "07_services_all" {
             Get-CimInstance Win32_Service | ForEach-Object {
-                $bin = $_.PathName
-                $exe = $null
+                $bin = $_.PathName; $exe = $null
                 if ($bin) {
                     if ($bin -match '^"([^"]+)"') { $exe = $matches[1] }
                     elseif ($bin -match '^(\S+\.exe)') { $exe = $matches[1] }
                 }
                 [PSCustomObject]@{
-                    Name        = $_.Name
-                    DisplayName = $_.DisplayName
-                    State       = $_.State
-                    StartMode   = $_.StartMode
-                    ProcessId   = $_.ProcessId
-                    SizeMB      = SizeMB $exe
-                    PathName    = $bin
+                    Name = $_.Name; DisplayName = $_.DisplayName; State = $_.State
+                    StartMode = $_.StartMode; ProcessId = $_.ProcessId; SizeMB = SizeMB $exe; PathName = $bin
                 }
             } | Sort-Object State, Name
         }
 
-        # ---- 08 background / running services only ----
         Save "08_background_services" {
             Get-Service | Where-Object { $_.Status -eq 'Running' } | Select-Object Name, DisplayName, Status
         }
 
-        # ---- 09 DUPLICATE PROCESS INSTANCES ----
         Save "09_duplicate_processes" {
             if (-not $DuplicateReport -or $DuplicateReport.Count -eq 0) {
                 "No process had more than one running instance at cleanup time."
@@ -223,7 +705,6 @@ function Invoke-FindingsCollector {
         }
         SaveCsv "09_duplicate_processes" $DuplicateReport
 
-        # ---- 10 EXCLUDED FROM CLOSING ----
         Save "10_excluded_from_closing" {
             "Processes deliberately NOT closed, with the reason each was spared."
             "Recorder family in use: $RecorderFamily"
@@ -238,7 +719,6 @@ function Invoke-FindingsCollector {
         }
         SaveCsv "10_excluded_from_closing" $ExcludedReport
 
-        # ---- 11 FAILED TO CLOSE ----
         $failed = @($CloseLog | Where-Object { $_.Status -notlike "Closed*" })
         Save "11_failed_to_close" {
             if ($failed.Count -eq 0) {
@@ -256,14 +736,10 @@ function Invoke-FindingsCollector {
             }
         }
         SaveCsv "11_failed_to_close" $failed
-
-        # ---- 12 everything the cleanup touched ----
         SaveCsv "12_closed_processes" $CloseLog
 
-        # ---- 13 network connections ----
         Save "13_network_connections" { netstat -anob }
 
-        # ---- 14 drivers with size + signature ----
         Save "14_driver_list" {
             Get-CimInstance Win32_SystemDriver | ForEach-Object {
                 $p = $_.PathName
@@ -271,17 +747,12 @@ function Invoke-FindingsCollector {
                 $sig = $null
                 try { if ($p -and (Test-Path -LiteralPath $p)) { $sig = (Get-AuthenticodeSignature -FilePath $p -ErrorAction Stop).Status } } catch {}
                 [PSCustomObject]@{
-                    Name      = $_.Name
-                    State     = $_.State
-                    StartMode = $_.StartMode
-                    SizeMB    = SizeMB $p
-                    Signature = $sig
-                    PathName  = $p
+                    Name = $_.Name; State = $_.State; StartMode = $_.StartMode
+                    SizeMB = SizeMB $p; Signature = $sig; PathName = $p
                 }
             } | Sort-Object State, Name
         }
 
-        # ---- 15 unsigned exes in Program Files ----
         $pfPaths = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
         $pfFiles = Get-ChildItem -Path $pfPaths -Recurse -Include *.exe -ErrorAction SilentlyContinue
         $sizeMap = @{}
@@ -303,14 +774,12 @@ function Invoke-FindingsCollector {
             "NOTE: VirusTotal checking is manual."
         }
 
-        # ---- 16 root certificates ----
         Save "16_root_certificates" {
             Get-ChildItem Cert:\LocalMachine\Root |
                 Select-Object Subject, Thumbprint, NotBefore, NotAfter |
                 Sort-Object NotBefore -Descending
         }
 
-        # ---- 17 prefetch metadata ----
         Save "17_prefetch_files" {
             Get-ChildItem "$env:WINDIR\Prefetch" -Filter *.pf -ErrorAction SilentlyContinue |
                 Select-Object Name,
@@ -320,7 +789,6 @@ function Invoke-FindingsCollector {
                 Sort-Object LastWriteTime -Descending
         }
 
-        # ---- 18 recent items ----
         Save "18_recent_items" {
             Get-ChildItem "$env:APPDATA\Microsoft\Windows\Recent" -ErrorAction SilentlyContinue |
                 Select-Object Name,
@@ -329,7 +797,6 @@ function Invoke-FindingsCollector {
                 Sort-Object LastWriteTime -Descending
         }
 
-        # ---- 19 recent item targets ----
         Save "19_recent_items_targets" {
             $sh = New-Object -ComObject WScript.Shell
             Get-ChildItem "$env:APPDATA\Microsoft\Windows\Recent" -Filter *.lnk -ErrorAction SilentlyContinue |
@@ -337,11 +804,9 @@ function Invoke-FindingsCollector {
                     try {
                         $lnk = $sh.CreateShortcut($_.FullName)
                         [PSCustomObject]@{
-                            Name          = $_.Name
-                            Target        = $lnk.TargetPath
-                            Arguments     = $lnk.Arguments
-                            LnkSizeKB     = [math]::Round($_.Length / 1KB, 2)
-                            TargetSizeMB  = SizeMB $lnk.TargetPath
+                            Name = $_.Name; Target = $lnk.TargetPath; Arguments = $lnk.Arguments
+                            LnkSizeKB = [math]::Round($_.Length / 1KB, 2)
+                            TargetSizeMB = SizeMB $lnk.TargetPath
                             LastWriteTime = $_.LastWriteTime
                         }
                     } catch {
@@ -350,13 +815,9 @@ function Invoke-FindingsCollector {
                 }
         }
 
-        # ---- 19b shellbags (folders Explorer has displayed - persist after deletion) ----
         Save "19b_shellbags" {
-            $sbecmdDirs = @(
-                "$env:USERPROFILE\Desktop", "$env:USERPROFILE\Downloads",
-                $env:ProgramFiles, ${env:ProgramFiles(x86)}
-            ) | Where-Object { $_ -and (Test-Path $_) }
-
+            $sbecmdDirs = @("$env:USERPROFILE\Desktop", "$env:USERPROFILE\Downloads", $env:ProgramFiles, ${env:ProgramFiles(x86)}) |
+                Where-Object { $_ -and (Test-Path $_) }
             $sbecmd = $null
             foreach ($dir in $sbecmdDirs) {
                 $hit = Get-ChildItem -Path $dir -Filter "SBECmd.exe" -Recurse -ErrorAction SilentlyContinue -File | Select-Object -First 1
@@ -371,18 +832,11 @@ function Invoke-FindingsCollector {
                 try {
                     & $sbecmd --live --csv $sbOut 2>&1 | Out-String
                     "SBECmd finished - decoded CSV output is in shellbags_sbecmd\"
-                } catch {
-                    "SBECmd run FAILED: $_"
-                }
+                } catch { "SBECmd run FAILED: $_" }
             } else {
-                "SBECmd (Eric Zimmerman's ShellBags Explorer CLI) was not found on this machine."
-                "Below is a RAW dump of the shell bag registry keys instead - this is NOT a"
-                "decoded 'folders visited' listing, just the untouched binary data, because"
-                "properly decoding shellbag entries needs a real parser (SBECmd), not a"
-                "hand-rolled guess at Microsoft's undocumented binary format."
-                ""
-                "For a fully decoded shellbags.csv, install SBECmd (ericzimmerman.github.io)"
-                "and re-run this collector - it will be picked up automatically."
+                "SBECmd was not found on this machine. Below is a RAW dump of the shell bag"
+                "registry keys (NOT a decoded listing). Install SBECmd (ericzimmerman.github.io)"
+                "and re-run for a fully decoded shellbags.csv."
                 ""
                 $bagKeys = @(
                     "HKCU:\Software\Microsoft\Windows\Shell\BagMRU",
@@ -400,9 +854,6 @@ function Invoke-FindingsCollector {
                                 $props.PSObject.Properties | Where-Object { $_.Name -notlike "PS*" } | ForEach-Object {
                                     $readable = ""
                                     if ($_.Value -is [byte[]]) {
-                                        # best-effort: raw binary shell items usually embed the folder
-                                        # name as UTF-16LE text - this pulls anything printable out of
-                                        # the bytes without attempting to decode the full structure.
                                         $text = [System.Text.Encoding]::Unicode.GetString($_.Value)
                                         $found = [regex]::Matches($text, '[\x20-\x7E]{4,}')
                                         $readable = (($found | ForEach-Object { $_.Value }) -join ' | ')
@@ -417,27 +868,19 @@ function Invoke-FindingsCollector {
             }
         }
 
-        # ---- 20 MUI cache (apps that have been run, survives uninstall) ----
         Save "20_mui_cache" {
             "registry path: HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache"
             ""
             $k = "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache"
             if (Test-Path $k) {
                 $props = Get-ItemProperty -Path $k
-                $props.PSObject.Properties |
-                    Where-Object { $_.Name -notlike "PS*" } |
-                    ForEach-Object {
-                        $exe = ($_.Name -split '\.(FriendlyAppName|ApplicationCompany)$')[0]
-                        [PSCustomObject]@{
-                            Entry  = $_.Name
-                            Value  = $_.Value
-                            SizeMB = SizeMB $exe
-                        }
-                    } | Sort-Object Entry
+                $props.PSObject.Properties | Where-Object { $_.Name -notlike "PS*" } | ForEach-Object {
+                    $exe = ($_.Name -split '\.(FriendlyAppName|ApplicationCompany)$')[0]
+                    [PSCustomObject]@{ Entry = $_.Name; Value = $_.Value; SizeMB = SizeMB $exe }
+                } | Sort-Object Entry
             } else { "MuiCache key not present." }
         }
 
-        # ---- 21 BAM (background activity moderator - last run times) ----
         Save "21_bam_summary" {
             "registry path: HKLM:\SYSTEM\CurrentControlSet\Services\bam\State\UserSettings"
             ""
@@ -455,7 +898,6 @@ function Invoke-FindingsCollector {
             } else { "BAM key not present." }
         }
 
-        # ---- 22 USN journal (file create/delete since boot) ----
         Save "22_usn_journal_activity" {
             "USN journal activity on $env:SystemDrive - executable-ish extensions only."
             "Journal records carry filename + parent reference, not a full path."
@@ -466,7 +908,6 @@ function Invoke-FindingsCollector {
             } catch { "Could not read USN journal: $_" }
         }
 
-        # ---- 23 security posture (Malwarebytes-aware) ----
         Save "23_security_summary" {
             try {
                 $sb = Confirm-SecureBootUEFI -ErrorAction Stop
@@ -492,17 +933,15 @@ function Invoke-FindingsCollector {
             "--- Malwarebytes verification result ---"
             "  recorder family in use: $RecorderFamily"
             if (@($MbVerified | Where-Object { $_ }).Count -gt 0) {
-                "  SUCCESS: $($MbVerified.Count) verified-genuine Malwarebytes process(es) excluded from closing"
+                "  SUCCESS: $(@($MbVerified).Count) verified-genuine Malwarebytes process(es) excluded from closing"
                 $MbVerified | ForEach-Object {
                     "    {0} (PID {1}) {2} MB  knownBuild={3}`n      path: {4}`n      publisher: {5}`n      sha256: {6}" -f `
                         $_.Name, $_.PID, $_.SizeMB, $_.KnownBuild, $_.Path, $_.Publisher, $_.SHA256
                 }
-            } else {
-                "  FAILURE: no Malwarebytes process passed verification"
-            }
+            } else { "  FAILURE: no Malwarebytes process passed verification" }
             if (@($MbRejected | Where-Object { $_ }).Count -gt 0) {
                 ""
-                "  WARNING: $($MbRejected.Count) process(es) named like Malwarebytes FAILED verification and were NOT excluded:"
+                "  WARNING: $(@($MbRejected).Count) process(es) named like Malwarebytes FAILED verification and were NOT excluded:"
                 $MbRejected | ForEach-Object {
                     "    {0} (PID {1})`n      path: {2}`n      size: {3} MB`n      reason: {4}" -f `
                         $_.Name, $_.PID, $_.Path, $_.SizeMB, ($_.Reason -join "; ")
@@ -517,9 +956,7 @@ function Invoke-FindingsCollector {
                     "    {0} (PID {1}) {2} MB  knownBuild={3}`n      path: {4}`n      size: {5} bytes`n      signature: {6}`n      sha256: {7}`n      note: {8}" -f `
                         $_.Name, $_.PID, $_.SizeMB, $_.KnownBuild, $_.Path, $_.SizeBytes, $_.SignatureStatus, $_.SHA256, ($_.Reason -join "; ")
                 }
-            } else {
-                "  INFO: no MOSS process passed verification (or MOSS was not running)"
-            }
+            } else { "  INFO: no MOSS process passed verification (or MOSS was not running)" }
             if (@($MossRejected | Where-Object { $_ }).Count -gt 0) {
                 ""
                 "  WARNING: $(@($MossRejected).Count) process(es) named like MOSS FAILED verification and were NOT excluded:"
@@ -535,7 +972,6 @@ function Invoke-FindingsCollector {
                 ForEach-Object { "  {0}: {1}" -f $_.Name, $_.Status }
         }
 
-        # ---- 24 PowerShell environment ----
         Save "24_powershell_check" {
             "INFO: version $($PSVersionTable.PSVersion), edition $($PSVersionTable.PSEdition)"
             "INFO: language mode: $($ExecutionContext.SessionState.LanguageMode)"
@@ -549,14 +985,12 @@ function Invoke-FindingsCollector {
             }
         }
 
-        # ---- 25 monitor watchdog log ----
-        Save "25_display_watchdog" {
-            "Continuous second-display monitoring for this session."
+        Save "25_display_snapshot" {
+            "Display snapshot taken by the standalone cleanup script (no continuous watchdog)."
             ""
             if ($MonitorLog -and $MonitorLog.Count -gt 0) { $MonitorLog } else { "no entries" }
         }
 
-        # ---- 26 severity summary ----
         $critical = @($CloseLog | Where-Object { $_.Notes -like "*named like Malwarebytes*" -or $_.Notes -like "*named like MOSS*" }).Count `
                     + @($MbRejected | Where-Object { $_ }).Count `
                     + @($MossRejected | Where-Object { $_ }).Count
@@ -580,7 +1014,6 @@ function Invoke-FindingsCollector {
             "These are heuristics, not verdicts. A flag means 'look closer', not 'guilty'."
         }
 
-        # ---- raw artifact copies ----
         $logsRoot = Join-Path $temp "artifacts"
         New-Item -ItemType Directory -Path $logsRoot -Force | Out-Null
 
@@ -604,7 +1037,6 @@ function Invoke-FindingsCollector {
         $copyLog += Copy-Artifact "Windows Event Logs" "$env:WINDIR\System32\winevt\Logs"      "EventLogs"
         $copyLog | Set-Content -Path (Join-Path $temp "27_raw_artifact_copy_log.txt") -Encoding UTF8
 
-        # ---- checksum manifest: size + SHA256 for EVERY file in the package ----
         $manifest = @()
         $manifest += "format: SHA256 + size for every file in this package"
         $manifest += "created (UTC): $((Get-Date).ToUniversalTime().ToString('o'))"
@@ -623,25 +1055,25 @@ function Invoke-FindingsCollector {
         }
         $manifest | Set-Content -Path (Join-Path $temp "00_checksums.txt") -Encoding UTF8
 
-        # ---- package ----
         $acFolder = Join-Path $desktop "AC-FINDINGS"
         New-Item -ItemType Directory -Path $acFolder -Force | Out-Null
         $zipPath = Join-Path $acFolder "FINDINGS-$stamp.zip"
         if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 
         Add-Type -AssemblyName System.IO.Compression.FileSystem
-        [System.IO.Compression.ZipFile]::CreateFromDirectory(
-            $temp, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($temp, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
 
         Remove-Item $temp -Recurse -Force
         return $zipPath
     }
 
+    $displaySnapshot = @("[{0}] Display count at collection time: {1}" -f (Get-Date -Format "HH:mm:ss"), (Get-ActiveDisplayCount))
+
     $job = Start-Job -ScriptBlock $collector -ArgumentList @(
         $global:ExcludedReport,
         $global:CloseLog,
         $global:DuplicateReport,
-        @($global:MonitorLog),
+        $displaySnapshot,
         $global:MalwarebytesVerified,
         $global:MalwarebytesRejected,
         $global:RecorderFamily,
@@ -679,15 +1111,44 @@ function Invoke-FindingsCollector {
     $global:FindingsZip = $zipPath
 }
 
+# =========================================================================
+# MAIN
+# =========================================================================
+Write-Host "IMPORTANT: Your recording must already be running, and you must already be" -ForegroundColor Red
+Write-Host "in your Roblox match. MAXIMIZE this PowerShell window and keep it maximized." -ForegroundColor Red
+Write-Host ""
+Write-Host "This will close every non-essential process, then collect the findings ZIP." -ForegroundColor $theme.Accent
+Write-Host "MOSS, Roblox, your recorder and verified Malwarebytes are left running." -ForegroundColor $theme.Accent
+Write-Host ""
+Write-Host "Unsaved work in other apps WILL be lost. Save everything first." -ForegroundColor Red
+Write-Host ""
 
-# =========================================================================
-# RUN
-# =========================================================================
-Write-Host ""`nWrite-Host "  Closing unnecessary applications..." -ForegroundColor Yellow`nClose-UnnecessaryApps`nWrite-Host "  Application cleanup complete." -ForegroundColor Green`nInvoke-FindingsCollector
+$confirm = Read-Host "Continue? (Y/N)"
+if ($confirm -notmatch '^[Yy]') {
+    Write-Host "Cancelled. Nothing was changed." -ForegroundColor Cyan
+    return
+}
 
 Write-Host ""
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " Standalone findings collection complete." -ForegroundColor Cyan
-Write-Host " The ZIP is saved on the Desktop in AC-FINDINGS." -ForegroundColor Green
-Write-Host "============================================================" -ForegroundColor Cyan
-Read-Host "Press Enter to exit"
+$extra = Read-Host "Extra process names you're keeping open and can justify on camera (comma separated, or blank)"
+if ($extra) {
+    $global:justifiedExtras = @($extra -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+    Pause-ForCamera "Explain on camera why each of these is necessary: $extra"
+}
+
+Section "Recording Software"
+Write-Host "GPU detected: $($gpuNames -join ', ')" -ForegroundColor Gray
+Write-Host "OBS, NVIDIA ShadowPlay/Instant Replay, and AMD Adrenalin/ReLive are excluded automatically." -ForegroundColor Green
+
+Invoke-MalwarebytesVerification
+Invoke-MossVerification
+
+Invoke-CloseNonEssential
+Step-TaskManager
+Invoke-FindingsCollector
+
+Write-Host ""
+Write-Host "=== CLEANUP + FINDINGS COMPLETE ===" -ForegroundColor $theme.Header
+$zipDir = Join-Path ([Environment]::GetFolderPath('Desktop')) "AC-FINDINGS"
+if (Test-Path $zipDir) { Start-Process "explorer.exe" -ArgumentList $zipDir }
+Write-Host "Upload the ZIP from AC-FINDINGS to 'ow-submissions' while still recording." -ForegroundColor $theme.Accent
