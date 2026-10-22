@@ -80,6 +80,1066 @@ function Show-LoadingBar($label, $color, $steps = 24, $delayMs = 20) {
 }
 
 # =========================================================================
+# ENGINE: flags, scoring, timeline, signature cache, process trust rules
+# =========================================================================
+$global:SessionStart  = Get-Date
+$global:MatchStart    = $null
+$global:MatchEnd      = $null
+$global:FullChecks    = $true
+$global:Flags         = [System.Collections.ArrayList]::new()
+$global:Timeline      = [System.Collections.ArrayList]::new()
+$global:FlagKeys      = @{}
+$global:SigCache      = @{}
+$global:SnapStart     = $null
+$global:SnapEnd       = $null
+$global:WatchLog      = @()
+$global:ScanNotes     = [System.Collections.ArrayList]::new()
+$global:FlagTimeOverride = $null
+
+# category name -> plain-English meaning (order = order in the report)
+$global:FlagCategories = [ordered]@{
+    'Extra screens'               = 'A second/mirrored display was detected'
+    'Fake or renamed programs'    = 'Programs pretending to be Windows/Roblox/recorder/security software'
+    'Cheat tools and macros'      = 'Known cheat, injector, macro or remote-control tools, or programs run from odd places'
+    'Unsigned or injected code'   = 'Unsigned DLLs, unsigned drivers, or code living in Roblox memory with no file behind it'
+    'Private cheat indicators'    = 'Signs of a privately hosted cheat (odd servers, tunnels, download commands, proxies)'
+    'Tampering and cleanup'       = 'Deleted/disabled Prefetch, cleared logs, changed clock, test-signing, Defender changes'
+    'Hardware and DMA'            = 'Odd PCI/USB devices that can be used for DMA cards or input spoofing'
+    'Activity during match'       = 'New programs, drivers, devices or startup items that appeared during the match'
+}
+
+function Get-PhaseFor([datetime]$when) {
+    if (-not $global:MatchStart -or $when -lt $global:MatchStart) { return 'BEFORE' }
+    if ($global:MatchEnd -and $when -gt $global:MatchEnd) { return 'AFTER' }
+    return 'DURING'
+}
+
+function Add-TL([string]$src, [string]$msg, $when = $null) {
+    if ($null -eq $when) { $when = Get-Date }
+    [void]$global:Timeline.Add([PSCustomObject]@{
+        Time = [datetime]$when; Phase = (Get-PhaseFor ([datetime]$when)); Source = $src; Detail = $msg })
+}
+
+function Add-Flag([string]$cat, [int]$pts, [string]$title, [string]$detail = '') {
+    $key = "$cat|$title|$detail"
+    if ($global:FlagKeys.ContainsKey($key)) { return }
+    $global:FlagKeys[$key] = $true
+    $now = Get-Date
+    if ($global:FlagTimeOverride) { $now = [datetime]$global:FlagTimeOverride }
+    [void]$global:Flags.Add([PSCustomObject]@{
+        Time = $now; Phase = (Get-PhaseFor $now); Category = $cat; Points = $pts; Title = $title; Detail = $detail })
+    Add-TL 'FLAG' ("[{0}] {1} {2}" -f $cat, $title, $detail) $now
+}
+
+function Add-Note([string]$msg) { [void]$global:ScanNotes.Add(("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg)) }
+
+function Get-CategoryScore([string]$cat) {
+    $sum = 0
+    foreach ($f in $global:Flags) { if ($f.Category -eq $cat) { $sum += $f.Points } }
+    return [int][Math]::Min(100, $sum)
+}
+
+function Get-OverallScore {
+    # Chance-style combine: one very high category pulls the overall up,
+    # many small flags add up, but a pile of tiny things can never hit 100 alone.
+    $keep = 1.0
+    foreach ($c in $global:FlagCategories.Keys) {
+        $keep = $keep * (1 - ((Get-CategoryScore $c) / 100.0))
+    }
+    return [int][Math]::Round(100 * (1 - $keep))
+}
+
+function Get-ScoreBand([int]$s) {
+    if ($s -lt 30) { return 'LOW CONCERN (good - normally fine to accept)' }
+    if ($s -lt 60) { return 'MEDIUM CONCERN (a person should look at the evidence below)' }
+    return 'HIGH CONCERN (manager decision needed)'
+}
+
+# ---------- signatures ----------
+function Get-SigInfo($path) {
+    if (-not $path) { return [PSCustomObject]@{ Status = 'NoPath'; Publisher = $null } }
+    $k = $path.ToLower()
+    if ($global:SigCache.ContainsKey($k)) { return $global:SigCache[$k] }
+    $r = [PSCustomObject]@{ Status = 'Missing'; Publisher = $null }
+    try {
+        if (Test-Path -LiteralPath $path) {
+            $s = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop
+            $pub = $null
+            if ($s.SignerCertificate) { $pub = $s.SignerCertificate.Subject }
+            $r = [PSCustomObject]@{ Status = [string]$s.Status; Publisher = $pub }
+        }
+    } catch { $r = [PSCustomObject]@{ Status = 'Unreadable'; Publisher = $null } }
+    $global:SigCache[$k] = $r
+    return $r
+}
+
+# ---------- process trust rules ----------
+# A program is only trusted when its NAME, its FOLDER and its SIGNATURE all agree.
+# Name alone is never enough (that was the old bypass).
+$global:TrustRules = @(
+    @{ Class = 'Windows'; Spare = $true
+       Names = '^(svchost|csrss|lsass|smss|wininit|winlogon|services|dwm|explorer|fontdrvhost|runtimebroker|sihost|taskhostw|ctfmon|conhost|dllhost|wudfhost|searchindexer|searchhost|startmenuexperiencehost|shellexperiencehost|applicationframehost|textinputhost|spoolsv|audiodg|lsm|netsh|taskmgr|securityhealthservice|securityhealthsystray|msmpeng|nissrv|smartscreen|backgroundtaskhost|searchprotocolhost|searchfilterhost|wmiprvse|sppsvc|trustedinstaller|tiworker|useroobebroker|dashost|unsecapp|wlanext|msdtc|sgrmbroker|mpdefendercoreservice|systemsettings|gamebar|gamebarftserver|widgets|phoneexperiencehost|lockapp|mmc|regedit|userinit|dwmapi|sdxhelper|ngciso|usocoreworker|musnotification|compattelrunner|wermgr|werfault|consent|credentialuibroker|openconsole|windowsterminal|powershell|pwsh|cmd|wsmprovhost|mousocoreworker|wmiadap|backgroundtransferhost|windowsinternal\.composableshell\.experiences\.textinput\.inputapp|crossdeviceservice|crossdeviceresume|sgrmbroker|vmcompute|vmwp|audiodg|ctfmon|smss|msedgewebview2)$'
+       Path  = '(?i)^[a-z]:\\windows\\|\\programdata\\microsoft\\windows defender\\|\\program files( \(x86\))?\\windows defender\\|\\program files\\powershell\\|\\program files\\windowsapps\\microsoft\.|\\program files( \(x86\))?\\microsoft\\edgewebview\\'
+       Pub   = 'Microsoft' }
+    @{ Class = 'Roblox'; Spare = $true
+       Names = '^(robloxplayerbeta|robloxplayerlauncher|robloxcrashhandler|robloxplayerinstaller)$'
+       Path  = '(?i)\\appdata\\local\\roblox\\|\\program files( \(x86\))?\\roblox\\'
+       Pub   = 'Roblox' }
+    @{ Class = 'OBS'; Spare = $true; AllowUnsigned = $true
+       Names = '^(obs64|obs32|obs-browser-page|obs-ffmpeg-mux|obs-ffmpeg-mux32|obs-amf-test|obs-nvenc-test|obs-qsv-test|get-graphics-offsets64|get-graphics-offsets32|inject-helper64|inject-helper32)$'
+       Path  = '(?i)\\obs-studio\\'
+       Pub   = 'OBS|Open Broadcaster' }
+    @{ Class = 'NVIDIA'; Spare = $true
+       Names = '^(nv.*|nvidia.*|gfexperience.*|geforce.*|share|nvcplui|nvdisplay\.container)$'
+       Path  = '(?i)\\nvidia( corporation)?\\|\\driverstore\\filerepository\\nv|\\windows\\system32\\'
+       Pub   = 'NVIDIA' }
+    @{ Class = 'AMD'; Spare = $true
+       Names = '^(radeon.*|amd.*|cncmd|ati.*|atieclxx|atiesrxx|rsserv.*)$'
+       Path  = '(?i)\\amd\\|\\ati technologies\\|\\ati\\|\\driverstore\\filerepository\\|\\windows\\system32\\'
+       Pub   = 'Advanced Micro Devices|AMD' }
+    @{ Class = 'Malwarebytes'; Spare = $true
+       Names = '^(mbam|malwarebytes|mbamservice|mbamwsc|mbamtray|mbambgnativemsg|mbamcrashhandler|mbaminstallerservice|mbvpntunnelservice|ddshelper|mbampt|malwarebytes_assistant|assistant|ig|mbuns|mb5uns|mbupdatrv5)$'
+       Path  = '(?i)\\malwarebytes\\'
+       Pub   = 'Malwarebytes' }
+    @{ Class = 'ScriptTool'; Spare = $false
+       Names = '^(autoruns|autoruns64|sbecmd|procexp|procexp64)$'
+       Path  = '.*'
+       Pub   = 'Microsoft|Sysinternals' }
+    @{ Class = 'Discord'; Spare = $false
+       Names = '^(discord|update)$'
+       Path  = '(?i)\\appdata\\local\\discord\\|\\program files\\discord'
+       Pub   = 'Discord' }
+    @{ Class = 'Browser'; Spare = $false
+       Names = '^(chrome|msedge|firefox|brave|opera|vivaldi|chromium)$'
+       Path  = '(?i)\\program files( \(x86\))?\\|\\appdata\\local\\(google|microsoft|programs\\opera|bravesoftware)\\'
+       Pub   = 'Google|Microsoft|Mozilla|Brave|Opera|Vivaldi' }
+)
+
+# Kernel pseudo-processes: they have no file on disk, so they have no path.
+$global:PseudoProcs = @('system','idle','registry','memory compression','secure system','vmmem','vmmemwsl','system idle process')
+
+function Get-ProcVerdict([string]$name, [string]$path) {
+    $n = ($name -replace '\.exe$', '').ToLower()
+    $v = [PSCustomObject]@{ Class = 'Untrusted'; Trusted = $false; Spare = $false; Reason = ''; Impersonation = $false; Unverifiable = $false }
+
+    if (-not $path) {
+        if ($global:PseudoProcs -contains $n) { $v.Class = 'Windows'; $v.Trusted = $true; $v.Spare = $true; $v.Reason = 'kernel pseudo-process'; return $v }
+        foreach ($r in $global:TrustRules) {
+            if ($n -match $r.Names -and $r.Class -eq 'Windows') {
+                # Windows could not tell us the path (protected process). Never close these.
+                $v.Class = 'Windows'; $v.Spare = $true; $v.Unverifiable = $true
+                $v.Reason = 'core Windows name but path could not be read'; return $v
+            }
+        }
+        $v.Reason = 'path could not be read'; return $v
+    }
+
+    $sig = Get-SigInfo $path
+    $nameHit = $false
+    foreach ($r in $global:TrustRules) {
+        if ($n -notmatch $r.Names) { continue }
+        $nameHit = $true
+        $pathOk = ($path -match $r.Path)
+        $sigOk  = ($sig.Status -eq 'Valid' -and $sig.Publisher -and ($sig.Publisher -match $r.Pub))
+        if (-not $sigOk -and $r.AllowUnsigned -and $sig.Status -eq 'NotSigned') { $sigOk = $true }
+        if ($pathOk -and $sigOk) {
+            $v.Class = $r.Class; $v.Trusted = $true; $v.Spare = [bool]$r.Spare
+            $v.Reason = "name + folder + signature all match ($($r.Class))"; return $v
+        }
+        $why = @()
+        if (-not $pathOk) { $why += 'wrong folder' }
+        if (-not $sigOk)  { $why += "signature is '$($sig.Status)' / wrong publisher" }
+        $v.Class = 'Impersonation'; $v.Impersonation = $true
+        $v.Reason = "named like $($r.Class) but " + ($why -join ' and ')
+        return $v
+    }
+    # Any other Microsoft-signed program that lives in the Windows folders is trusted (but never exempted from cleanup).
+    if ($path -match '(?i)^[a-z]:\\windows\\|\\windowsapps\\microsoft\.|\\program files( \(x86\))?\\(windowsapps|microsoft)\\' -and $sig.Status -eq 'Valid' -and $sig.Publisher -match 'Microsoft') {
+        $v.Class = 'MicrosoftOther'; $v.Trusted = $true; $v.Reason = 'Microsoft-signed program in a Windows folder'; return $v
+    }
+    $v.Reason = 'not on the allowed list'
+    return $v
+}
+
+# Levenshtein distance - catches look-alike names such as svch0st / expl0rer
+function Get-EditDistance([string]$a, [string]$b) {
+    $m = $a.Length; $n = $b.Length
+    if ($m -eq 0) { return $n }; if ($n -eq 0) { return $m }
+    $d = New-Object 'int[,]' ($m + 1), ($n + 1)
+    for ($i = 0; $i -le $m; $i++) { $d[$i, 0] = $i }
+    for ($j = 0; $j -le $n; $j++) { $d[0, $j] = $j }
+    for ($i = 1; $i -le $m; $i++) {
+        for ($j = 1; $j -le $n; $j++) {
+            $cost = if ($a[$i - 1] -eq $b[$j - 1]) { 0 } else { 1 }
+            $d[$i, $j] = [Math]::Min([Math]::Min($d[($i - 1), $j] + 1, $d[$i, ($j - 1)] + 1), $d[($i - 1), ($j - 1)] + $cost)
+        }
+    }
+    return $d[$m, $n]
+}
+$global:LookalikeTargets = @('svchost','csrss','lsass','smss','wininit','winlogon','services','explorer','taskhostw','runtimebroker','conhost','dllhost','spoolsv','fontdrvhost','taskmgr','powershell','robloxplayerbeta','robloxplayerlauncher','discord','chrome','msedge','obs64','nvcontainer','mbamservice','audiodg','dwm','sihost','ctfmon','searchindexer','wmiprvse','msmpeng')
+
+function Get-LookalikeOf([string]$name) {
+    $n = ($name -replace '\.exe$', '').ToLower()
+    if ($n.Length -lt 3) { return $null }
+    if ($global:LookalikeTargets -contains $n) { return $null }
+    foreach ($t in $global:LookalikeTargets) {
+        if ([Math]::Abs($t.Length - $n.Length) -gt 1) { continue }
+        $dist = Get-EditDistance $n $t
+        if ($dist -le 1 -and $t.Length -ge 5) { return $t }
+        if ($dist -le 2 -and $t.Length -ge 8) { return $t }
+    }
+    return $null
+}
+
+# ---------- regex lists used by the scans ----------
+$global:CheatRx  = '(?i)(synapse ?x?|krnl|fluxus|solara|wave ?executor|jjsploit|scriptware|script-?ware|electron|oxygen ?u|evon|hydrogen|delta ?exec|codex|arceus|celery|comet|macsploit|sirhurt|executor|injector|exploit|cheat|aimbot|aimlock|triggerbot|wallhack|esp\b|spoofer|hwid|loader|bypass|dllinject|extreme ?injector|xenos|process ?hacker|cheat ?engine|cheatengine|processhacker|x64dbg|x32dbg|ida64|ollydbg|reclass|wireshark|fiddler|httpdebugger)'
+$global:MacroRx  = '(?i)(autohotkey|ahk|tinytask|jitbit|macro ?recorder|pulover|autoclicker|auto-?clicker|op ?auto ?clicker|ghub|lghub|logitech.*gaming|razer ?synapse|rzsynapse|icue|steelseries|x-?mouse|xmbc|bloody|a4tech|ucore|reWASD|joytokey|interception|kmbox|makcu)'
+$global:RemoteRx = '(?i)(anydesk|teamviewer|rustdesk|parsec|chrome ?remote|remoting_host|ultraviewer|ammyy|supremo|splashtop|logmein|screenconnect|radmin|vnc|nomachine|moonlight|sunshine|tailscale|zerotier|ngrok|cloudflared|playit|frpc|wireguard|openvpn|hamachi|localtunnel|bore\.exe)'
+$global:ByovdRx  = '(?i)(capcom|gdrv|iqvw64|asio64|asmmap|atillk|cpuz|cpu-?z|dbutil|ene\.sys|enetechio|glckio2|gmer|kprocesshacker|kdmapper|lha|mhyprot|physmem|rtcore|speedfan|winio|winring0|zam64|zemana|throttlestop|nvflash|amifldrv|bs_flash|asrdrv|hw64|inpoutx64|libnicm|msio|nicm|piddrv|ntiolib|wnbios|windbg|vboxdrv|dbk64|dbk32|blackbone|nvoclock|corsairllaccess|rzpnk|directio|eneio|nvaudio)'
+$global:DmaNameRx= '(?i)(xilinx|fpga|pcileech|screamer|squirrel|enigma|raptor|captain dma|dma ?card|ft601|ft60x|ftdi.*(601|60x)|artix|kintex|spartan|zynq|altera|cyclone|lattice|ecp5|pcie.*(card|bridge).*(unknown)|thunderbolt.*pcie|usb3380|neteract|plx)'
+$global:CaptureRx= '(?i)(elgato|avermedia|magewell|capture ?card|hdmi ?capture|cam ?link|hd60|4k60|game ?capture|blackmagic|decklink|startech.*cap|ezcap|j5create.*cap|usb3 ?video)'
+$global:MicroRx  = '(?i)(arduino|pro ?micro|teensy|leonardo|raspberry pi pico|rp2040|digispark|atmega32u4|cp210|ch340|ch9102|esp32|esp8266)'
+$global:FpgaVenRx= 'VEN_(10EE|1172|1204|10B5|1A1D|1D0F)'
+$global:MicroVidRx = 'VID_(2341|2A03|16C0|1B4F|2E8A|239A|1209)'
+
+# =========================================================================
+# DETECTION SCANS (run at set-up and again after the match - never mid-game)
+# =========================================================================
+function Get-ProcTable {
+    $rows = @()
+    try {
+        $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+        $names = @{}
+        foreach ($p in $all) { $names[[int]$p.ProcessId] = $p.Name }
+        foreach ($p in $all) {
+            $pn = $null
+            if ($names.ContainsKey([int]$p.ParentProcessId)) { $pn = $names[[int]$p.ParentProcessId] }
+            $rows += [PSCustomObject]@{ Name = $p.Name; PID = [int]$p.ProcessId; PPID = [int]$p.ParentProcessId
+                ParentName = $pn; Path = $p.ExecutablePath; Cmd = $p.CommandLine; Created = $p.CreationDate }
+        }
+    } catch {}
+    return $rows
+}
+
+function Test-UserWritablePath([string]$path) {
+    if (-not $path) { return $false }
+    return ($path -match '(?i)\\(temp|tmp|downloads|desktop|documents|appdata\\local\\temp|appdata\\roaming|public|programdata|\$recycle\.bin)\\')
+}
+
+# ---- 1. running programs: identity, look-alikes, cheat/macro/remote tools ----
+function Scan-Processes([string]$label = 'SCAN') {
+    $self = $PID
+    foreach ($p in (Get-ProcTable)) {
+        if ($p.PID -eq $self -or $p.PID -le 4) { continue }
+        $v = Get-ProcVerdict $p.Name $p.Path
+        $tag = "{0} (PID {1}) {2}" -f $p.Name, $p.PID, $p.Path
+        if ($v.Impersonation) {
+            Add-Flag 'Fake or renamed programs' 70 'Program is pretending to be a trusted one' "$tag :: $($v.Reason)"
+            continue
+        }
+        if ($v.Unverifiable) { Add-Flag 'Fake or renamed programs' 3 'Core Windows program whose path could not be checked' $tag }
+        $look = Get-LookalikeOf $p.Name
+        if ($look) { Add-Flag 'Fake or renamed programs' 45 "Name looks like '$look' but is not it" $tag }
+        if ($v.Trusted) { continue }
+
+        $sig = Get-SigInfo $p.Path
+        $nm = ($p.Name -replace '\.exe$', '')
+        if ($nm -match $global:CheatRx -or ($p.Cmd -and $p.Cmd -match $global:CheatRx -and $p.Name -notmatch '(?i)^(powershell|pwsh|conhost|cmd)')) {
+            Add-Flag 'Cheat tools and macros' 60 'Name/command line matches a known cheat or injector tool' "$tag :: $($p.Cmd)"
+        }
+        if ($nm -match $global:MacroRx) { Add-Flag 'Cheat tools and macros' 25 'Macro / hotkey / auto-clicker software running' $tag }
+        if ($nm -match $global:RemoteRx) { Add-Flag 'Private cheat indicators' 35 'Remote-control or tunnel tool running' $tag }
+        if (Test-UserWritablePath $p.Path) {
+            Add-Flag 'Cheat tools and macros' 25 'Program running from Temp/Downloads/Desktop/AppData' $tag
+        }
+        if ($sig.Status -ne 'Valid' -and $sig.Status -ne 'NoPath') {
+            Add-Flag 'Unsigned or injected code' 10 "Running program has no valid signature ($($sig.Status))" $tag
+        }
+        if ($p.Name -match '(?i)^(python|pythonw|node|java|javaw|wscript|cscript|mshta|rundll32|regsvr32|autohotkey.*|ahk.*)\.exe$' -and $p.Cmd) {
+            Add-Flag 'Cheat tools and macros' 20 'Script interpreter running with a command line' "$tag :: $($p.Cmd)"
+        }
+        if (-not $p.Path) { Add-Flag 'Fake or renamed programs' 15 'Running program with unreadable path (hidden?)' "$($p.Name) (PID $($p.PID))" }
+    }
+}
+
+# ---- 2. Roblox loaded modules + executable memory with no file behind it ----
+function Scan-RobloxModules {
+    $rp = @(Get-Process RobloxPlayerBeta -ErrorAction SilentlyContinue)
+    if ($rp.Count -eq 0) { Add-Note 'Roblox was not running during this module scan.'; return }
+    foreach ($proc in $rp) {
+        $mods = $null
+        try { $mods = @($proc.Modules) } catch { $mods = $null }
+        if (-not $mods) { Add-Note 'Roblox blocked module listing (its own protection). Memory scan below used instead.'; continue }
+        foreach ($m in $mods) {
+            $mp = $m.FileName
+            if (-not $mp) { continue }
+            if ($mp -match '(?i)\\windows\\(system32|syswow64|winsxs)\\') { continue }
+            $sig = Get-SigInfo $mp
+            if ($sig.Status -ne 'Valid') {
+                Add-Flag 'Unsigned or injected code' 45 'Unsigned module loaded inside Roblox' "$mp ($($sig.Status))"
+            } elseif ($mp -notmatch '(?i)\\roblox\\' -and $sig.Publisher -notmatch 'Microsoft|NVIDIA|Advanced Micro|Intel|Realtek|Roblox|OBS|Google') {
+                Add-Flag 'Unsigned or injected code' 25 'Third-party module loaded inside Roblox' "$mp ($($sig.Publisher))"
+            }
+        }
+    }
+}
+
+$global:MemTypeLoaded = $false
+function Initialize-MemScanType {
+    if ($global:MemTypeLoaded) { return $true }
+    try {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class RecMem {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MBI { public IntPtr BaseAddress; public IntPtr AllocationBase; public uint AllocationProtect; public ushort PartitionId; public IntPtr RegionSize; public uint State; public uint Protect; public uint Type; }
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern UIntPtr VirtualQueryEx(IntPtr h, IntPtr addr, out MBI mbi, UIntPtr len);
+    public static string Scan(int pid) {
+        IntPtr h = OpenProcess(0x0400 | 0x0010, false, pid);
+        if (h == IntPtr.Zero) return "BLOCKED:" + Marshal.GetLastWin32Error();
+        long addr = 0; int rwx = 0; int rx = 0; long rwxBytes = 0;
+        MBI mbi = new MBI();
+        UIntPtr sz = (UIntPtr)Marshal.SizeOf(typeof(MBI));
+        while (addr < 0x7FFFFFFEFFFFL) {
+            UIntPtr r = VirtualQueryEx(h, (IntPtr)addr, out mbi, sz);
+            if (r == UIntPtr.Zero) break;
+            long size = mbi.RegionSize.ToInt64();
+            if (mbi.State == 0x1000 && mbi.Type == 0x20000) {
+                if (mbi.Protect == 0x40) { rwx++; rwxBytes += size; }
+                else if (mbi.Protect == 0x20) { rx++; }
+            }
+            long next = addr + size;
+            if (next <= addr) break;
+            addr = next;
+        }
+        CloseHandle(h);
+        return "OK:" + rwx + ":" + rwxBytes + ":" + rx;
+    }
+}
+'@ -ErrorAction Stop
+        $global:MemTypeLoaded = $true
+    } catch { return $false }
+    return $true
+}
+
+function Scan-RobloxMemory {
+    $rp = @(Get-Process RobloxPlayerBeta -ErrorAction SilentlyContinue)
+    if ($rp.Count -eq 0) { return }
+    if (-not (Initialize-MemScanType)) { Add-Note 'Memory scanner could not be compiled on this PC.'; return }
+    foreach ($proc in $rp) {
+        $res = $null
+        try { $res = [RecMem]::Scan($proc.Id) } catch { $res = "ERROR:$($_.Exception.Message)" }
+        if ($res -like 'OK:*') {
+            $parts = $res.Split(':')
+            $rwx = [int]$parts[1]; $mb = [math]::Round([double]$parts[2] / 1MB, 2); $rx = [int]$parts[3]
+            Add-Note ("Roblox memory (PID {0}): {1} private read-write-execute regions ({2} MB), {3} private execute-only regions." -f $proc.Id, $rwx, $mb, $rx)
+            if ($rwx -ge 8)     { Add-Flag 'Unsigned or injected code' 35 'Many executable memory regions with no file behind them in Roblox' "PID $($proc.Id): $rwx regions, $mb MB (heuristic - Roblox itself can use some)" }
+            elseif ($rwx -ge 3) { Add-Flag 'Unsigned or injected code' 15 'Some executable memory regions with no file behind them in Roblox' "PID $($proc.Id): $rwx regions, $mb MB (low confidence)" }
+        } else {
+            Add-Note "Roblox memory scan not possible: $res (Roblox protection or permissions)."
+        }
+    }
+}
+
+# ---- 3. startup items, scheduled tasks, hotkeys and what they launch ----
+function Scan-Startup([string]$label = 'SCAN') {
+    $runKeys = @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce',
+                 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run','HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce',
+                 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run')
+    foreach ($k in $runKeys) {
+        if (-not (Test-Path $k)) { continue }
+        $pr = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+        foreach ($prop in $pr.PSObject.Properties) {
+            if ($prop.Name -like 'PS*') { continue }
+            $val = [string]$prop.Value
+            Add-TL 'STARTUP' ("Run key {0}: {1} = {2}" -f $k.Replace('HKCU:\Software\Microsoft\Windows\CurrentVersion\','HKCU..\').Replace('HKLM:\Software\Microsoft\Windows\CurrentVersion\','HKLM..\'), $prop.Name, $val)
+            if ($val -match $global:CheatRx) { Add-Flag 'Cheat tools and macros' 50 'Startup entry matches a cheat tool' "$($prop.Name) = $val" }
+            elseif ($val -match $global:MacroRx) { Add-Flag 'Cheat tools and macros' 20 'Startup entry for macro/hotkey software' "$($prop.Name) = $val" }
+            elseif (Test-UserWritablePath $val) { Add-Flag 'Cheat tools and macros' 20 'Startup entry launches from Temp/Downloads/AppData' "$($prop.Name) = $val" }
+        }
+    }
+    foreach ($d in @("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup", "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp")) {
+        if (-not (Test-Path $d)) { continue }
+        foreach ($f in (Get-ChildItem $d -File -ErrorAction SilentlyContinue)) {
+            Add-TL 'STARTUP' "Startup folder item: $($f.FullName) (modified $($f.LastWriteTime))" $f.LastWriteTime
+            if ($f.Name -match $global:CheatRx) { Add-Flag 'Cheat tools and macros' 45 'Startup-folder item matches a cheat tool' $f.FullName }
+        }
+    }
+    # scheduled tasks that are NOT Microsoft's and run something from a user folder
+    try {
+        foreach ($t in (Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskPath -notmatch '^\\Microsoft\\' -and $_.State -ne 'Disabled' })) {
+            foreach ($a in @($t.Actions)) {
+                $ex = [string]$a.Execute
+                if (-not $ex) { continue }
+                $line = "$ex $($a.Arguments)"
+                if ($line -match $global:CheatRx) { Add-Flag 'Cheat tools and macros' 45 'Scheduled task matches a cheat tool' "$($t.TaskName): $line" }
+                elseif (Test-UserWritablePath $ex) { Add-Flag 'Cheat tools and macros' 15 'Scheduled task launches from a user folder' "$($t.TaskName): $line" }
+            }
+        }
+    } catch {}
+    # shortcut files with a hotkey assigned, and what they open
+    try {
+        $sh = New-Object -ComObject WScript.Shell
+        $dirs = @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('CommonDesktopDirectory'),
+                  "$env:APPDATA\Microsoft\Windows\Start Menu\Programs", "$env:ProgramData\Microsoft\Windows\Start Menu\Programs") | Where-Object { $_ -and (Test-Path $_) }
+        foreach ($d in $dirs) {
+            foreach ($l in (Get-ChildItem $d -Filter *.lnk -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 800)) {
+                try {
+                    $s = $sh.CreateShortcut($l.FullName)
+                    if ($s.Hotkey) {
+                        Add-TL 'HOTKEY' ("Shortcut hotkey [{0}] on '{1}' launches {2} {3}" -f $s.Hotkey, $l.Name, $s.TargetPath, $s.Arguments)
+                        Add-Flag 'Cheat tools and macros' 8 "Keyboard hotkey assigned to a shortcut ($($s.Hotkey))" "$($l.Name) -> $($s.TargetPath) $($s.Arguments)"
+                    }
+                } catch {}
+            }
+        }
+    } catch {}
+    # AutoHotkey scripts: list every hotkey and what it runs
+    $roots = @("$env:USERPROFILE\Desktop", "$env:USERPROFILE\Documents", "$env:USERPROFILE\Downloads", "$env:APPDATA", "$env:LOCALAPPDATA\Temp")
+    foreach ($r in $roots) {
+        if (-not (Test-Path $r)) { continue }
+        foreach ($f in (Get-ChildItem $r -Include *.ahk,*.ahk2 -Recurse -File -Depth 4 -ErrorAction SilentlyContinue | Select-Object -First 40)) {
+            Add-Flag 'Cheat tools and macros' 35 'AutoHotkey script file found' "$($f.FullName) (modified $($f.LastWriteTime))"
+            Add-TL 'HOTKEY' "AutoHotkey script: $($f.FullName)" $f.LastWriteTime
+            try {
+                foreach ($ln in (Get-Content -LiteralPath $f.FullName -TotalCount 400 -ErrorAction Stop)) {
+                    if ($ln -match '^\s*([\^\+!#~\*\$<>]*[A-Za-z0-9_]+|[\^\+!#~\*\$<>]*(F\d+|XButton\d|LButton|RButton|MButton|WheelUp|WheelDown))\s*::') { Add-TL 'HOTKEY' ("  hotkey in {0}: {1}" -f $f.Name, $ln.Trim()) }
+                    elseif ($ln -match '^\s*(Run|RunWait)\b') { Add-TL 'HOTKEY' ("  launches in {0}: {1}" -f $f.Name, $ln.Trim()) }
+                }
+            } catch {}
+        }
+    }
+    # config folders of mouse/keyboard macro suites (log only - they are legal hardware tools)
+    foreach ($c in @("$env:LOCALAPPDATA\LGHUB","$env:PROGRAMDATA\Razer","$env:LOCALAPPDATA\Razer","$env:PROGRAMFILES\Corsair","$env:APPDATA\SteelSeries","$env:APPDATA\TinyTask","$env:APPDATA\Pulover*")) {
+        if (Test-Path $c) { Add-TL 'HOTKEY' "Macro-capable software settings present: $c"; Add-Flag 'Cheat tools and macros' 5 'Macro-capable mouse/keyboard software installed' $c }
+    }
+}
+
+# ---- 4. network, DNS, hosts file, proxy, certificates, tunnels, command history ----
+function Scan-Network([string]$label = 'SCAN') {
+    $procs = @{}
+    foreach ($p in (Get-ProcTable)) { $procs[[int]$p.PID] = $p }
+    try {
+        foreach ($c in (Get-NetTCPConnection -State Established -ErrorAction Stop)) {
+            $ra = $c.RemoteAddress
+            if ($ra -match '^(127\.|::1|0\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|fe80|fc|fd)') { continue }
+            $p = $procs[[int]$c.OwningProcess]
+            if (-not $p) { continue }
+            $v = Get-ProcVerdict $p.Name $p.Path
+            if ($v.Class -in @('Windows','MicrosoftOther','Roblox','OBS','NVIDIA','AMD','Malwarebytes','Discord','Browser','ScriptTool')) { continue }
+            Add-TL 'NETWORK' ("{0} (PID {1}) -> {2}:{3}" -f $p.Name, $p.PID, $ra, $c.RemotePort)
+            $sig = Get-SigInfo $p.Path
+            if ($sig.Status -ne 'Valid') { Add-Flag 'Private cheat indicators' 30 'Unsigned/untrusted program talking to the internet' ("{0} -> {1}:{2} ({3})" -f $p.Name, $ra, $c.RemotePort, $p.Path) }
+        }
+        foreach ($c in (Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.LocalAddress -in @('0.0.0.0','::') -and $_.LocalPort -gt 1024 })) {
+            $p = $procs[[int]$c.OwningProcess]
+            if (-not $p) { continue }
+            $v = Get-ProcVerdict $p.Name $p.Path
+            if (-not $v.Trusted -and $v.Class -notin @('Discord','Browser','ScriptTool')) {
+                Add-Flag 'Private cheat indicators' 20 'Untrusted program is listening for outside connections' ("{0} port {1} ({2})" -f $p.Name, $c.LocalPort, $p.Path)
+            }
+        }
+    } catch {}
+    try {
+        $dns = @(Get-DnsClientCache -ErrorAction Stop | Select-Object -ExpandProperty Entry -Unique)
+        foreach ($d in $dns) {
+            if ($d -match '(?i)(trycloudflare\.com|ngrok(-free)?\.(io|app|dev)|duckdns\.org|ddns\.net|no-ip\.|serveo\.net|localtunnel|playit\.gg|portmap\.io|loca\.lt|hopto\.org|zapto\.org)') {
+                Add-Flag 'Private cheat indicators' 30 'Recent lookup of a tunnel / dynamic-DNS host' $d
+            } elseif ($d -match '(?i)(synapse|krnl|fluxus|solara|wearedevs|executor|exploit|cheat|injector|sploit|scriptblox|rscripts|v3rmillion|unknowncheats|aimbot)') {
+                Add-Flag 'Private cheat indicators' 40 'Recent lookup of a cheat-related website' $d
+            } elseif ($d -match '^\d{1,3}(\.\d{1,3}){3}$') {
+                Add-Flag 'Private cheat indicators' 10 'Program looked up a raw IP address' $d
+            }
+        }
+        Add-TL 'NETWORK' ("DNS cache holds {0} entries at this moment" -f $dns.Count)
+    } catch {}
+    try {
+        $hosts = @(Get-Content "$env:WINDIR\System32\drivers\etc\hosts" -ErrorAction Stop | Where-Object { $_ -match '^\s*[^#\s]' })
+        foreach ($h in $hosts) {
+            if ($h -notmatch '^\s*(127\.0\.0\.1|::1)\s+localhost\s*$') { Add-Flag 'Private cheat indicators' 40 'Custom entry in the hosts file' $h.Trim() }
+        }
+    } catch {}
+    try {
+        $ie = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
+        if ($ie.ProxyEnable -eq 1 -and $ie.ProxyServer) { Add-Flag 'Private cheat indicators' 30 'A Windows proxy is switched on' ([string]$ie.ProxyServer) }
+        if ($ie.AutoConfigURL) { Add-Flag 'Private cheat indicators' 30 'Auto-proxy script configured' ([string]$ie.AutoConfigURL) }
+    } catch {}
+    try {
+        foreach ($a in (Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -match '(?i)(tap-windows|wireguard|tailscale|zerotier|openvpn|hamachi|wintun|vpn|tunnel)' })) {
+            Add-Flag 'Private cheat indicators' 15 'VPN / tunnel network adapter is up' "$($a.Name) - $($a.InterfaceDescription)"
+        }
+    } catch {}
+    try {
+        $cut = (Get-Date).AddDays(-45)
+        foreach ($c in (Get-ChildItem Cert:\LocalMachine\Root -ErrorAction Stop | Where-Object { $_.NotBefore -gt $cut -and $_.Issuer -notmatch 'Microsoft' })) {
+            Add-Flag 'Private cheat indicators' 30 'Recently added root certificate (can hide a man-in-the-middle proxy)' "$($c.Subject) added/valid from $($c.NotBefore)"
+        }
+    } catch {}
+    $hist = "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt"
+    if (Test-Path $hist) {
+        try {
+            $lines = @(Get-Content $hist -Tail 300 -ErrorAction Stop)
+            foreach ($l in $lines) {
+                if ($l -match '(?i)(wevtutil\s+(cl|clear-log)|Clear-EventLog|fsutil\s+usn\s+deletejournal|del(ete)?\s+.*\.pf|Remove-Item.*prefetch|Set-MpPreference|Add-MpPreference|bcdedit.*(testsigning|nointegritychecks|debug)|vssadmin\s+delete|sc\s+(stop|config).*(sysmain|eventlog|windefend))') {
+                    Add-Flag 'Tampering and cleanup' 45 'PowerShell history shows a clean-up / security-change command' $l.Trim()
+                } elseif ($l -match '(?i)(DownloadString|DownloadFile|Invoke-WebRequest|\biwr\b|\birm\b|curl\s+-|bitsadmin|certutil.*urlcache|Start-BitsTransfer|Invoke-Expression|\biex\b)' -and $l -notmatch 'bubbl3gumsim') {
+                    Add-Flag 'Private cheat indicators' 20 'PowerShell history shows a download/run command' $l.Trim()
+                }
+            }
+        } catch {}
+    }
+}
+
+# ---- 5. tampering: prefetch, logs, clock, journals, defender, signing mode, drivers ----
+function Scan-Tamper([string]$label = 'SCAN') {
+    $pfDir = "$env:WINDIR\Prefetch"
+    try {
+        $en = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters' -ErrorAction Stop).EnablePrefetcher
+        if ($en -eq 0) { Add-Flag 'Tampering and cleanup' 60 'Prefetch is switched OFF in the registry' 'EnablePrefetcher = 0 (normal is 3)' }
+    } catch {}
+    try {
+        $sm = Get-Service SysMain -ErrorAction Stop
+        if ($sm.Status -ne 'Running') { Add-Flag 'Tampering and cleanup' 45 'SysMain (Prefetch service) is not running' "$($sm.Status), start type $($sm.StartType)" }
+    } catch {}
+    $boot = $null
+    try { $boot = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch {}
+    try {
+        $pf = @(Get-ChildItem $pfDir -Filter *.pf -ErrorAction Stop)
+        Add-TL 'PREFETCH' ("Prefetch folder holds {0} files at this moment" -f $pf.Count)
+        if ($pf.Count -eq 0) { Add-Flag 'Tampering and cleanup' 60 'Prefetch folder is EMPTY' $pfDir }
+        elseif ($pf.Count -lt 40) { Add-Flag 'Tampering and cleanup' 20 'Prefetch folder has very few files (a used PC normally has 100+)' "$($pf.Count) files" }
+        if ($pf.Count -gt 0 -and $boot) {
+            $newest = ($pf | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+            $oldest = ($pf | Sort-Object CreationTime | Select-Object -First 1)
+            if ($newest.LastWriteTime -lt $boot) { Add-Flag 'Tampering and cleanup' 30 'No Prefetch file is newer than the last boot' "newest $($newest.Name) at $($newest.LastWriteTime), boot $boot" }
+            if ($oldest.CreationTime -gt (Get-Date).AddDays(-2) -and (Get-Date) -gt $boot.AddHours(1)) { Add-Flag 'Tampering and cleanup' 25 'All Prefetch files were created in the last 2 days (folder looks recently wiped)' "oldest created $($oldest.CreationTime)" }
+        }
+        foreach ($f in ($pf | Where-Object { $_.Name -match $global:CheatRx })) { Add-Flag 'Cheat tools and macros' 55 'Prefetch shows a cheat-named program has run' "$($f.Name) last run $($f.LastWriteTime)" }
+    } catch { Add-Flag 'Tampering and cleanup' 25 'Prefetch folder could not be read' "$pfDir" }
+    try {
+        $evs = @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 1102; StartTime = (Get-Date).AddDays(-14) } -MaxEvents 5 -ErrorAction Stop)
+        foreach ($e in $evs) { Add-Flag 'Tampering and cleanup' 55 'Security event log was CLEARED' "at $($e.TimeCreated)" }
+    } catch {}
+    try {
+        $evs = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 104; StartTime = (Get-Date).AddDays(-14) } -MaxEvents 5 -ErrorAction Stop)
+        foreach ($e in $evs) { Add-Flag 'Tampering and cleanup' 55 'A Windows event log was CLEARED' "at $($e.TimeCreated)" }
+    } catch {}
+    try {
+        $evs = @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4616; StartTime = (Get-Date).AddDays(-2) } -MaxEvents 10 -ErrorAction Stop)
+        foreach ($e in $evs) { Add-Flag 'Tampering and cleanup' 30 'System clock was changed recently' "at $($e.TimeCreated)" }
+    } catch {}
+    try {
+        $evs = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-General'; Id = 1; StartTime = (Get-Date).AddDays(-2) } -MaxEvents 10 -ErrorAction Stop)
+        foreach ($e in ($evs | Where-Object { $_.Message -match 'change' })) { Add-Flag 'Tampering and cleanup' 20 'Kernel recorded a system-time change' "at $($e.TimeCreated)" }
+    } catch {}
+    try {
+        $out = (& fsutil usn queryjournal $env:SystemDrive 2>&1 | Out-String)
+        if ($out -match '(?i)not active|not found|error') { Add-Flag 'Tampering and cleanup' 35 'USN file-change journal is off or was deleted' ($out.Trim() -replace '\s+', ' ') }
+        elseif ($out -match 'First USN\s*:\s*(\d+)' -and [int64]$matches[1] -gt 0 -and $boot) {
+            Add-TL 'USN' ("USN journal first record number = {0}" -f $matches[1])
+        }
+    } catch {}
+    try {
+        $bcd = (& bcdedit /enum '{current}' 2>&1 | Out-String)
+        if ($bcd -match '(?i)testsigning\s+Yes') { Add-Flag 'Tampering and cleanup' 60 'Windows TEST-SIGNING mode is on (allows unsigned drivers)' 'bcdedit testsigning Yes' }
+        if ($bcd -match '(?i)nointegritychecks\s+Yes') { Add-Flag 'Tampering and cleanup' 60 'Driver integrity checks are turned off' 'bcdedit nointegritychecks Yes' }
+        if ($bcd -match '(?i)\bdebug\s+Yes') { Add-Flag 'Tampering and cleanup' 40 'Kernel debugging is on' 'bcdedit debug Yes' }
+    } catch {}
+    try {
+        $mp = Get-MpPreference -ErrorAction Stop
+        foreach ($x in @($mp.ExclusionPath) + @($mp.ExclusionProcess) + @($mp.ExclusionExtension)) { if ($x) { Add-Flag 'Tampering and cleanup' 35 'Windows Defender exclusion present' $x } }
+        if ($mp.DisableRealtimeMonitoring) { Add-Flag 'Tampering and cleanup' 25 'Defender real-time protection is off' '(may be normal if another antivirus is installed)' }
+    } catch {}
+    try {
+        if (-not (Confirm-SecureBootUEFI -ErrorAction Stop)) { Add-Flag 'Tampering and cleanup' 15 'Secure Boot is OFF' '' }
+    } catch {}
+    try {
+        $dg = Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard -ErrorAction Stop
+        if ($dg.VirtualizationBasedSecurityStatus -ne 2) { Add-Flag 'Tampering and cleanup' 15 'Virtualization-based security is not running' "status $($dg.VirtualizationBasedSecurityStatus)" }
+        if (@($dg.SecurityServicesRunning) -notcontains 2) { Add-Flag 'Tampering and cleanup' 20 'Memory Integrity (HVCI) is not running' '' }
+        if (@($dg.AvailableSecurityProperties) -notcontains 3) { Add-Flag 'Hardware and DMA' 10 'DMA protection is not available/enabled on this PC' 'Cannot rule out DMA devices as easily' }
+    } catch {}
+    # drivers
+    try {
+        foreach ($d in (Get-CimInstance Win32_SystemDriver -ErrorAction Stop | Where-Object { $_.State -eq 'Running' })) {
+            $p = $d.PathName; if ($p) { $p = $p -replace '^\\\?\?\\', ''; $p = $p -replace '^\\SystemRoot', $env:WINDIR; $p = $p -replace '^system32', "$env:WINDIR\system32" }
+            $base = [IO.Path]::GetFileNameWithoutExtension([string]$p)
+            if ($d.Name -match $global:ByovdRx -or $base -match $global:ByovdRx) { Add-Flag 'Unsigned or injected code' 55 'Known abused/vulnerable driver is loaded' "$($d.Name) $p" }
+            $sig = Get-SigInfo $p
+            if ($p -and $sig.Status -notin @('Valid','Missing','NoPath')) { Add-Flag 'Unsigned or injected code' 45 'Running driver with an invalid or missing signature' "$($d.Name) $p ($($sig.Status))" }
+            elseif ($p -and (Test-UserWritablePath $p)) { Add-Flag 'Unsigned or injected code' 45 'Driver running from a user folder' "$($d.Name) $p" }
+        }
+        foreach ($s in (Get-CimInstance Win32_Service -ErrorAction Stop | Where-Object { $_.PathName -match '(?i)(\\temp\\|\\downloads\\|\\appdata\\|\\users\\public\\)' })) {
+            Add-Flag 'Cheat tools and macros' 30 'Service whose program lives in a user/temp folder' "$($s.Name): $($s.PathName)"
+        }
+    } catch {}
+    try {
+        $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+        if ($cs.Model -match '(?i)(virtual|vmware|virtualbox|kvm|qemu|hyper-v)' -or $cs.Manufacturer -match '(?i)(vmware|qemu|xen|innotek|parallels)') {
+            Add-Flag 'Tampering and cleanup' 40 'This PC is a VIRTUAL MACHINE' "$($cs.Manufacturer) / $($cs.Model)"
+        }
+    } catch {}
+}
+
+# ---- 6. hardware: DMA indicators, capture cards, microcontroller input devices ----
+function Scan-Hardware([string]$label = 'SCAN') {
+    try {
+        $present = @(Get-PnpDevice -PresentOnly -ErrorAction Stop)
+        foreach ($d in $present) {
+            $id = [string]$d.InstanceId; $nm = [string]$d.FriendlyName
+            if ($id -match $global:FpgaVenRx -and $id -match '^PCI\\') { Add-Flag 'Hardware and DMA' 45 'PCI device from an FPGA / bridge-chip vendor (typical of DMA cards)' "$nm [$id]" }
+            if ($nm -match $global:DmaNameRx -or $id -match $global:DmaNameRx) { Add-Flag 'Hardware and DMA' 55 'Device name matches DMA/FPGA hardware' "$nm [$id]" }
+            if ($id -match 'VID_0403&PID_(601F|601E)') { Add-Flag 'Hardware and DMA' 35 'FTDI FT601 USB3 bridge (used by some DMA cards)' "$nm [$id]" }
+            if ($nm -match $global:CaptureRx) { Add-Flag 'Hardware and DMA' 30 'Video capture card present (can feed a second PC)' "$nm [$id]" }
+            if ($id -match '^(USB|HID)\\' -and ($id -match $global:MicroVidRx -or $nm -match $global:MicroRx)) { Add-Flag 'Hardware and DMA' 40 'Microcontroller-type USB device (can fake mouse/keyboard input)' "$nm [$id]" }
+            if ($d.Class -eq 'Net' -and $nm -match '(?i)(tap|tun|wintun)') { Add-TL 'HARDWARE' "Virtual network device: $nm" }
+        }
+        $cnt = @($present | Where-Object { $_.InstanceId -like 'PCI\*' }).Count
+        Add-TL 'HARDWARE' ("{0} PCI devices, {1} USB devices present" -f $cnt, @($present | Where-Object { $_.InstanceId -like 'USB\*' }).Count)
+    } catch { Add-Note 'Hardware list could not be read.' }
+    try {
+        foreach ($d in (Get-PnpDevice -ErrorAction Stop | Where-Object { $_.Status -eq 'Unknown' -or $_.Present -eq $false })) {
+            $id = [string]$d.InstanceId; $nm = [string]$d.FriendlyName
+            if ($nm -match $global:DmaNameRx -or $id -match $global:FpgaVenRx -or $nm -match $global:CaptureRx -or $id -match $global:MicroVidRx) {
+                Add-Flag 'Hardware and DMA' 25 'A matching device was connected before but is not plugged in now' "$nm [$id]"
+            }
+        }
+    } catch {}
+    try {
+        $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction Stop)
+        Add-TL 'HARDWARE' ("Graphics: " + (($gpus | ForEach-Object { $_.Name }) -join ' | '))
+        if (@($gpus | Where-Object { $_.Name -notmatch '(?i)(basic|remote|virtual|meta|parsec)' }).Count -gt 2) { Add-Flag 'Hardware and DMA' 10 'More than two graphics adapters' (($gpus | ForEach-Object { $_.Name }) -join ' | ') }
+    } catch {}
+}
+
+# ---- 7. screens (full evidence, incl. mirrored ones) ----
+function Scan-Displays {
+    $n = Get-ActiveDisplayCount
+    $ev = @()
+    try { foreach ($m in (Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction Stop | Where-Object { $_.Active })) {
+        $nm = ''; try { $nm = -join ($m.UserFriendlyName | Where-Object { $_ -gt 0 } | ForEach-Object { [char]$_ }) } catch {}
+        $ev += ("monitor '{0}' [{1}]" -f $nm, $m.InstanceName) } } catch {}
+    Add-TL 'DISPLAY' ("Active display count = {0}. {1}" -f $n, ($ev -join '; '))
+    if ($n -gt 1) { Add-Flag 'Extra screens' 100 'MORE THAN ONE SCREEN DETECTED' (("count {0}: " -f $n) + ($ev -join '; ')) }
+}
+
+function Invoke-AllScans([string]$label = 'SCAN') {
+    Add-TL 'SCAN' "Started $label scans"
+    Scan-Displays
+    if ($global:FullChecks) {
+        $steps = @('Scan-Processes','Scan-RobloxModules','Scan-RobloxMemory','Scan-Startup','Scan-Network','Scan-Tamper','Scan-Hardware')
+        foreach ($s in $steps) {
+            try { & $s $label } catch { Add-Note "$s failed: $($_.Exception.Message)" }
+        }
+    }
+    Add-TL 'SCAN' "Finished $label scans"
+}
+
+# =========================================================================
+# MATCH WATCHER (silent: it only LOGS, it never shows the player anything)
+# =========================================================================
+$global:WatchBag = $null
+$global:WatchCtl = $null
+$global:WatchPS  = $null
+$global:WatchRS  = $null
+
+function Start-MatchWatcher {
+    if (-not $global:FullChecks) { return }
+    $global:WatchBag = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+    $global:WatchCtl = [hashtable]::Synchronized(@{ Stop = $false })
+    try {
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.Open()
+        $rs.SessionStateProxy.SetVariable('bag', $global:WatchBag)
+        $rs.SessionStateProxy.SetVariable('ctl', $global:WatchCtl)
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        $code = {
+            function Rec($kind, $name, $procId, $ppid, $path, $detail) {
+                [void]$bag.Add([PSCustomObject]@{ Time = (Get-Date); Kind = $kind; Name = $name; PID = $procId; PPID = $ppid; Path = $path; Detail = $detail })
+            }
+            $started = Get-Date
+            try { [System.Threading.Thread]::CurrentThread.Priority = [System.Threading.ThreadPriority]::BelowNormal } catch {}
+            $w = $null
+            try {
+                $q = New-Object System.Management.WqlEventQuery('SELECT * FROM Win32_ProcessStartTrace')
+                $w = New-Object System.Management.ManagementEventWatcher($q)
+                Register-ObjectEvent -InputObject $w -EventName EventArrived -SourceIdentifier 'RecProcStart' | Out-Null
+                $w.Start()
+            } catch { Rec 'INFO' 'watcher' 0 0 $null "process-start trace unavailable: $($_.Exception.Message)"; $w = $null }
+
+            $knownDrv = @{}; $knownSvc = @{}; $knownPnp = @{}; $knownConn = @{}; $knownPf = @{}
+            $first = $true
+            $lastSlow = Get-Date '2000-01-01'
+            $lastProcPoll = Get-Date '2000-01-01'
+            $seenPid = @{}
+            while (-not $ctl.Stop) {
+                # --- instant process-start events ---
+                if ($w) {
+                    $evs = @()
+                    try { $evs = @(Get-Event -SourceIdentifier 'RecProcStart' -ErrorAction SilentlyContinue) } catch {}
+                    foreach ($ev in $evs) {
+                        try {
+                            $n = $ev.SourceEventArgs.NewEvent
+                            $pidv = [int]$n.ProcessID; $ppidv = [int]$n.ParentProcessID
+                            $path = $null
+                            try { $path = [System.Diagnostics.Process]::GetProcessById($pidv).MainModule.FileName } catch {}
+                            if (-not $path) { try { $path = (Get-CimInstance Win32_Process -Filter "ProcessId=$pidv" -ErrorAction Stop).ExecutablePath } catch {} }
+                            $cmd = $null
+                            try { $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$pidv" -ErrorAction Stop).CommandLine } catch {}
+                            $seenPid[$pidv] = $true
+                            Rec 'PROC' $n.ProcessName $pidv $ppidv $path $cmd
+                        } catch {}
+                        try { Remove-Event -EventIdentifier $ev.EventIdentifier -ErrorAction SilentlyContinue } catch {}
+                    }
+                }
+                # --- backup poll (every 4s) so nothing is missed if the trace is blocked ---
+                if (((Get-Date) - $lastProcPoll).TotalSeconds -ge 4) {
+                    $lastProcPoll = Get-Date
+                    try {
+                        foreach ($p in (Get-CimInstance Win32_Process -ErrorAction Stop)) {
+                            $k = [int]$p.ProcessId
+                            if (-not $seenPid.ContainsKey($k)) {
+                                $seenPid[$k] = $true
+                                if (-not $first) { Rec 'PROC' $p.Name $k ([int]$p.ParentProcessId) $p.ExecutablePath $p.CommandLine }
+                            }
+                        }
+                    } catch {}
+                }
+                # --- slower checks every 12s ---
+                if (((Get-Date) - $lastSlow).TotalSeconds -ge 20) {
+                    $lastSlow = Get-Date
+                    try { foreach ($d in (Get-CimInstance Win32_SystemDriver -ErrorAction Stop | Where-Object { $_.State -eq 'Running' })) {
+                        if (-not $knownDrv.ContainsKey($d.Name)) { $knownDrv[$d.Name] = 1; if (-not $first) { Rec 'DRIVER' $d.Name 0 0 $d.PathName 'driver started' } } } } catch {}
+                    try { foreach ($s in (Get-CimInstance Win32_Service -ErrorAction Stop)) {
+                        $key = $s.Name
+                        if (-not $knownSvc.ContainsKey($key)) { $knownSvc[$key] = 1; if (-not $first) { Rec 'SERVICE' $s.Name 0 0 $s.PathName ("new service, state " + $s.State) } } } } catch {}
+                    try { foreach ($d in (Get-PnpDevice -PresentOnly -ErrorAction Stop)) {
+                        $key = $d.InstanceId
+                        if (-not $knownPnp.ContainsKey($key)) { $knownPnp[$key] = 1; if (-not $first) { Rec 'PNP' $d.FriendlyName 0 0 $key 'device appeared' } } } } catch {}
+                    try { foreach ($c in (Get-NetTCPConnection -State Established -ErrorAction Stop)) {
+                        $ra = $c.RemoteAddress
+                        if ($ra -match '^(127\.|::1|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])|fe80|0\.)') { continue }
+                        $key = "$($c.OwningProcess)|$ra|$($c.RemotePort)"
+                        if (-not $knownConn.ContainsKey($key)) { $knownConn[$key] = 1; $pn = $null; try { $pn = (Get-Process -Id $c.OwningProcess -ErrorAction Stop).ProcessName } catch {}
+                            Rec 'CONN' $pn ([int]$c.OwningProcess) 0 $null ("{0}:{1}" -f $ra, $c.RemotePort) } } } catch {}
+                    try {
+                        $cur = @{}
+                        foreach ($f in (Get-ChildItem "$env:WINDIR\Prefetch" -Filter *.pf -ErrorAction Stop)) { $cur[$f.Name] = $f.LastWriteTime }
+                        foreach ($k in @($knownPf.Keys)) { if (-not $cur.ContainsKey($k)) { Rec 'PFDEL' $k 0 0 $null 'Prefetch file disappeared'; $knownPf.Remove($k) } }
+                        foreach ($k in $cur.Keys) {
+                            if (-not $knownPf.ContainsKey($k)) { if (-not $first) { Rec 'PFNEW' $k 0 0 $null ("Prefetch file created " + $cur[$k]) } }
+                            elseif ($knownPf[$k] -ne $cur[$k]) { Rec 'PFRUN' $k 0 0 $null ("Prefetch file updated " + $cur[$k]) }
+                            $knownPf[$k] = $cur[$k]
+                        }
+                    } catch {}
+                    try { foreach ($e in (Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 1102; StartTime = $started } -MaxEvents 3 -ErrorAction Stop)) { Rec 'LOGCLEAR' 'Security' 0 0 $null ("log cleared at " + $e.TimeCreated) } } catch {}
+                    try { foreach ($e in (Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 104; StartTime = $started } -MaxEvents 3 -ErrorAction Stop)) { Rec 'LOGCLEAR' 'System' 0 0 $null ("log cleared at " + $e.TimeCreated) } } catch {}
+                    $first = $false
+                }
+                Start-Sleep -Milliseconds 400
+            }
+            try { if ($w) { $w.Stop() } } catch {}
+        }
+        [void]$ps.AddScript($code.ToString())
+        [void]$ps.BeginInvoke()
+        $global:WatchPS = $ps
+        $global:WatchRS = $rs
+        Add-TL 'WATCHER' 'Silent match watcher started (logs new programs, drivers, devices, connections, Prefetch changes)'
+    } catch { Add-Note "Match watcher could not start: $($_.Exception.Message)" }
+}
+
+function Stop-MatchWatcher {
+    if (-not $global:WatchCtl) { return }
+    $global:WatchCtl.Stop = $true
+    Start-Sleep -Milliseconds 900
+    try { $global:WatchLog = @($global:WatchBag.ToArray()) } catch { $global:WatchLog = @() }
+    try { if ($global:WatchPS) { $global:WatchPS.Stop(); $global:WatchPS.Dispose() } } catch {}
+    try { if ($global:WatchRS) { $global:WatchRS.Close(); $global:WatchRS.Dispose() } } catch {}
+    Add-TL 'WATCHER' ("Watcher stopped. {0} events recorded." -f @($global:WatchLog).Count)
+}
+
+# Turn the raw watcher log into timeline lines and flags (done after the match, on the checker's side)
+function Convert-WatchLog {
+    $log = @($global:WatchLog | Sort-Object Time)
+    if ($log.Count -eq 0) { return }
+    # which processes belong to this script itself (its own helper jobs, tools it opened)?
+    $own = @{}; $own[[int]$PID] = $true
+    foreach ($e in $log) { if ($e.Kind -eq 'PROC' -and $own.ContainsKey([int]$e.PPID)) { $own[[int]$e.PID] = $true } }
+    $shell = '^(powershell|pwsh|cmd|windowsterminal|openconsole|regedit|mmc|wscript|cscript|mshta|wmic|reg|sc|net|net1|bcdedit|wevtutil|fsutil|taskkill|schtasks|certutil|bitsadmin|msiexec|installutil|regsvr32|rundll32)$'
+    $scriptTools = '^(autoruns|autoruns64|sbecmd|devmgmt|mmc|regedit|explorer|systemsettings|useraccountcontrolsettings|taskmgr|control)$'
+    $ownSpam = 0
+    $winTools = '^(notepad|mspaint|calc|calculator|snippingtool|wordpad|osk|magnify|charmap|msinfo32|perfmon|resmon|eventvwr|compmgmt|diskmgmt|control|dxdiag|winver|write|snippingtool|screenclippinghost)$'
+    foreach ($e in $log) {
+        $global:FlagTimeOverride = $e.Time
+        $ph = Get-PhaseFor $e.Time
+        switch ($e.Kind) {
+            'PROC' {
+                $nm = ($e.Name -replace '\.exe$', '')
+                if ($own.ContainsKey([int]$e.PID)) { $ownSpam++; continue }
+                $v = Get-ProcVerdict $e.Name $e.Path
+                $short = if (-not $e.Path) { ' (exited before path could be read)' } else { '' }
+                Add-TL 'PROC START' ("{0} (PID {1}, parent PID {2}) {3} [{4}]{5}" -f $e.Name, $e.PID, $e.PPID, $e.Path, $v.Class, $short) $e.Time
+                if ($v.Impersonation) { Add-Flag 'Fake or renamed programs' 60 "Program pretending to be a trusted one was started ($ph)" ("{0} {1} :: {2}" -f $e.Name, $e.Path, $v.Reason); continue }
+                $look = Get-LookalikeOf $e.Name
+                if ($look) { Add-Flag 'Fake or renamed programs' 40 "Look-alike program name started ($ph)" "$($e.Name) ~ $look" }
+                if ($nm -match $global:CheatRx -or ($e.Detail -and $e.Detail -match $global:CheatRx -and $nm -notmatch '(?i)^(powershell|pwsh|conhost|cmd)')) {
+                    Add-Flag 'Cheat tools and macros' 60 "Cheat-matching program started ($ph)" ("{0} {1} :: {2}" -f $e.Name, $e.Path, $e.Detail)
+                }
+                if ($nm -match $global:MacroRx) { Add-Flag 'Cheat tools and macros' 25 "Macro / hotkey software started ($ph)" "$($e.Name) $($e.Path)" }
+                if ($nm -match $global:RemoteRx) { Add-Flag 'Private cheat indicators' 35 "Remote-control / tunnel software started ($ph)" "$($e.Name) $($e.Path)" }
+                if ($ph -eq 'BEFORE') { continue }
+                # during or after the match: only the allowed apps may open
+                $allowed = $false
+                if ($v.Class -in @('Windows','MicrosoftOther','Roblox','OBS','NVIDIA','AMD','Malwarebytes','Discord')) { $allowed = $true }
+                if ($v.Class -eq 'MicrosoftOther' -and $nm -match $winTools -and $ph -eq 'DURING') {
+                    Add-Flag 'Activity during match' 15 'Windows tool opened during the match' ("{0} (PID {1})" -f $e.Name, $e.PID)
+                }
+                if ($v.Class -eq 'Browser' -and $tier -eq '2') { $allowed = $true }
+                if ($v.Class -eq 'ScriptTool' -and $ph -eq 'AFTER') { $allowed = $true }
+                if ($v.Class -eq 'Windows' -and $nm -match $shell -and $ph -eq 'DURING') {
+                    Add-Flag 'Activity during match' 30 'Command shell / system tool opened during the match' ("{0} (PID {1}) {2}" -f $e.Name, $e.PID, $e.Detail)
+                }
+                if (-not $allowed) {
+                    $pts = if ($v.Trusted) { 30 } else { 50 }
+                    Add-Flag 'Activity during match' $pts "Program that is not allowed was opened ($ph)" ("{0} (PID {1}) {2} [{3}]" -f $e.Name, $e.PID, $e.Path, $v.Reason)
+                }
+            }
+            'DRIVER'  { Add-TL 'DRIVER' ("{0} started: {1}" -f $e.Name, $e.Path) $e.Time
+                        if ($ph -ne 'BEFORE') { Add-Flag 'Activity during match' 45 "New driver started ($ph)" ("{0} {1}" -f $e.Name, $e.Path) }
+                        if ($e.Name -match $global:ByovdRx) { Add-Flag 'Unsigned or injected code' 55 'Known abused/vulnerable driver started' ("{0} {1}" -f $e.Name, $e.Path) } }
+            'SERVICE' { Add-TL 'SERVICE' ("{0} created/seen: {1}" -f $e.Name, $e.Path) $e.Time
+                        if ($ph -ne 'BEFORE') { Add-Flag 'Activity during match' 30 "New Windows service appeared ($ph)" ("{0} {1}" -f $e.Name, $e.Path) } }
+            'PNP'     { Add-TL 'DEVICE' ("{0} [{1}]" -f $e.Name, $e.Path) $e.Time
+                        if ($ph -ne 'BEFORE') { Add-Flag 'Activity during match' 30 "Hardware device plugged in ($ph)" ("{0} [{1}]" -f $e.Name, $e.Path) }
+                        if (($e.Name -match $global:DmaNameRx) -or ($e.Path -match $global:FpgaVenRx) -or ($e.Name -match $global:CaptureRx) -or ($e.Path -match $global:MicroVidRx)) {
+                            Add-Flag 'Hardware and DMA' 40 "Suspicious hardware appeared ($ph)" ("{0} [{1}]" -f $e.Name, $e.Path) } }
+            'CONN'    { Add-TL 'NETWORK' ("{0} (PID {1}) connected to {2}" -f $e.Name, $e.PID, $e.Detail) $e.Time
+                        if ($ph -ne 'BEFORE' -and $e.Name -and $e.Name -notmatch '(?i)^(robloxplayerbeta|discord|chrome|msedge|firefox|svchost|obs64|nvcontainer|mbamservice|system|brave|opera)$') {
+                            Add-Flag 'Private cheat indicators' 25 "Unexpected program made an internet connection ($ph)" ("{0} -> {1}" -f $e.Name, $e.Detail) } }
+            'PFNEW'   { Add-TL 'PREFETCH' ("{0} :: {1}" -f $e.Name, $e.Detail) $e.Time
+                        if ($e.Name -match $global:CheatRx) { Add-Flag 'Cheat tools and macros' 55 "Prefetch shows a cheat-named program ran ($ph)" $e.Name } }
+            'PFRUN'   { Add-TL 'PREFETCH' ("{0} :: {1}" -f $e.Name, $e.Detail) $e.Time
+                        if ($e.Name -match $global:CheatRx) { Add-Flag 'Cheat tools and macros' 55 "Prefetch shows a cheat-named program ran ($ph)" $e.Name } }
+            'PFDEL'   { Add-TL 'PREFETCH' ("DELETED: {0}" -f $e.Name) $e.Time
+                        Add-Flag 'Tampering and cleanup' 70 'A Prefetch file was DELETED while the script was running' ("{0} ({1})" -f $e.Name, $ph) }
+            'LOGCLEAR'{ Add-Flag 'Tampering and cleanup' 70 "A Windows event log was CLEARED while the script was running ($ph)" ("{0}: {1}" -f $e.Name, $e.Detail) }
+            default   { Add-Note ("Watcher: {0}" -f $e.Detail) }
+        }
+    }
+    $global:FlagTimeOverride = $null
+    if ($ownSpam -gt 0) { Add-TL 'PROC START' ("({0} start-ups by this script's own helper jobs were left out)" -f $ownSpam) }
+}
+
+# =========================================================================
+# BEFORE / AFTER SNAPSHOTS
+# =========================================================================
+function Get-Snapshot([string]$label) {
+    $s = @{ Label = $label; Time = Get-Date; Drivers = @{}; Services = @{}; Pnp = @{}; Pf = @{}; Run = @{}; Tasks = @{}; Certs = @{}; Hosts = ''; Displays = 1; Procs = @{} }
+    try { foreach ($d in (Get-CimInstance Win32_SystemDriver -ErrorAction Stop | Where-Object { $_.State -eq 'Running' })) { $s.Drivers[$d.Name] = $d.PathName } } catch {}
+    try { foreach ($d in (Get-CimInstance Win32_Service -ErrorAction Stop)) { $s.Services[$d.Name] = $d.PathName } } catch {}
+    try { foreach ($d in (Get-PnpDevice -PresentOnly -ErrorAction Stop)) { $s.Pnp[[string]$d.InstanceId] = [string]$d.FriendlyName } } catch {}
+    try { foreach ($f in (Get-ChildItem "$env:WINDIR\Prefetch" -Filter *.pf -ErrorAction Stop)) { $s.Pf[$f.Name] = $f.LastWriteTime } } catch {}
+    foreach ($k in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKLM:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce')) {
+        if (Test-Path $k) { $pr = Get-ItemProperty $k -ErrorAction SilentlyContinue; foreach ($p in $pr.PSObject.Properties) { if ($p.Name -notlike 'PS*') { $s.Run["$k|$($p.Name)"] = [string]$p.Value } } }
+    }
+    try { foreach ($t in (Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskPath -notmatch '^\\Microsoft\\' })) { $s.Tasks[$t.TaskPath + $t.TaskName] = [string]$t.State } } catch {}
+    try { foreach ($c in (Get-ChildItem Cert:\LocalMachine\Root -ErrorAction Stop)) { $s.Certs[$c.Thumbprint] = $c.Subject } } catch {}
+    try { $s.Hosts = (Get-FileHash "$env:WINDIR\System32\drivers\etc\hosts" -Algorithm SHA256 -ErrorAction Stop).Hash } catch {}
+    $s.Displays = Get-ActiveDisplayCount
+    try { foreach ($p in (Get-ProcTable)) { $s.Procs[[string]$p.Name + '|' + [string]$p.Path] = $true } } catch {}
+    return $s
+}
+
+function Compare-Snapshots($a, $b) {
+    $out = @()
+    if (-not $a -or -not $b) { return @('Snapshot comparison not available.') }
+    $out += ("Start snapshot: {0}    End snapshot: {1}" -f $a.Time, $b.Time)
+    foreach ($k in $b.Drivers.Keys) { if (-not $a.Drivers.ContainsKey($k)) { $out += "NEW DRIVER: $k  $($b.Drivers[$k])"; Add-Flag 'Activity during match' 45 'Driver loaded between the start and end snapshots' "$k $($b.Drivers[$k])" } }
+    foreach ($k in $a.Drivers.Keys) { if (-not $b.Drivers.ContainsKey($k)) { $out += "DRIVER GONE: $k  $($a.Drivers[$k])"; Add-Flag 'Activity during match' 25 'Driver was unloaded between the start and end snapshots' $k } }
+    foreach ($k in $b.Services.Keys) { if (-not $a.Services.ContainsKey($k)) { $out += "NEW SERVICE: $k  $($b.Services[$k])"; Add-Flag 'Activity during match' 30 'Service added between the start and end snapshots' "$k $($b.Services[$k])" } }
+    foreach ($k in $b.Pnp.Keys) { if (-not $a.Pnp.ContainsKey($k)) { $out += "NEW DEVICE: $($b.Pnp[$k]) [$k]"; Add-Flag 'Activity during match' 30 'Device appeared between the start and end snapshots' "$($b.Pnp[$k]) [$k]" } }
+    foreach ($k in $a.Pnp.Keys) { if (-not $b.Pnp.ContainsKey($k)) { $out += "DEVICE REMOVED: $($a.Pnp[$k]) [$k]"; Add-Flag 'Activity during match' 25 'Device was unplugged between the start and end snapshots' "$($a.Pnp[$k]) [$k]" } }
+    foreach ($k in $a.Pf.Keys) { if (-not $b.Pf.ContainsKey($k)) { $out += "PREFETCH DELETED: $k"; Add-Flag 'Tampering and cleanup' 70 'Prefetch file missing at the end that existed at the start' $k } }
+    foreach ($k in $b.Pf.Keys) {
+        if (-not $a.Pf.ContainsKey($k)) { $out += "PREFETCH NEW: $k  ($($b.Pf[$k]))" }
+        elseif ($a.Pf[$k] -ne $b.Pf[$k]) { $out += "PREFETCH RAN AGAIN: $k  ($($a.Pf[$k]) -> $($b.Pf[$k]))" }
+        if (($k -match $global:CheatRx -or $k -match $global:MacroRx -or $k -match $global:RemoteRx) -and (-not $a.Pf.ContainsKey($k) -or $a.Pf[$k] -ne $b.Pf[$k])) {
+            Add-Flag 'Cheat tools and macros' 55 'Prefetch shows a cheat/macro/remote tool ran during the match' $k
+        }
+    }
+    if ($b.Pf.Count -lt ($a.Pf.Count - 3)) { Add-Flag 'Tampering and cleanup' 40 'Prefetch folder shrank during the match' "$($a.Pf.Count) -> $($b.Pf.Count) files" }
+    foreach ($k in $b.Run.Keys) { if (-not $a.Run.ContainsKey($k)) { $out += "NEW STARTUP ENTRY: $k = $($b.Run[$k])"; Add-Flag 'Activity during match' 35 'Startup entry added during the match' "$k = $($b.Run[$k])" } }
+    foreach ($k in $b.Tasks.Keys) { if (-not $a.Tasks.ContainsKey($k)) { $out += "NEW SCHEDULED TASK: $k"; Add-Flag 'Activity during match' 30 'Scheduled task added during the match' $k } }
+    foreach ($k in $b.Certs.Keys) { if (-not $a.Certs.ContainsKey($k)) { $out += "NEW ROOT CERTIFICATE: $($b.Certs[$k])"; Add-Flag 'Activity during match' 40 'Root certificate added during the match' $b.Certs[$k] } }
+    if ($a.Hosts -ne $b.Hosts) { $out += 'HOSTS FILE CHANGED'; Add-Flag 'Activity during match' 60 'The hosts file changed during the match' '' }
+    if ($b.Displays -gt $a.Displays) { $out += "SCREENS: $($a.Displays) -> $($b.Displays)"; Add-Flag 'Extra screens' 100 'Screen count went UP during the match' "$($a.Displays) -> $($b.Displays)" }
+    foreach ($k in $b.Procs.Keys) {
+        if (-not $a.Procs.ContainsKey($k)) {
+            $parts = $k.Split('|', 2)
+            $v = Get-ProcVerdict $parts[0] $parts[1]
+            $out += "PROGRAM RUNNING AT END BUT NOT AT START: $($parts[0])  $($parts[1])  [$($v.Class)]"
+        }
+    }
+    return $out
+}
+
+# =========================================================================
+# REPORT + SEAL
+# =========================================================================
+function Get-Bar([int]$pct) { $n = [int][Math]::Round($pct / 5.0); return ('[' + ('#' * $n) + ('.' * (20 - $n)) + ']') }
+
+function Build-FlagsText {
+    $sb = New-Object System.Text.StringBuilder
+    $overall = Get-OverallScore
+    [void]$sb.AppendLine('=====================================================================')
+    [void]$sb.AppendLine(' FLAGS / CONCERN SUMMARY  (read this first)')
+    [void]$sb.AppendLine('=====================================================================')
+    [void]$sb.AppendLine((' Made by    : {0} on {1} (user {2})' -f 'recrules', $env:COMPUTERNAME, $env:USERNAME))
+    [void]$sb.AppendLine((' Tier       : {0}' -f $tier))
+    [void]$sb.AppendLine((' Script run : {0}' -f $global:SessionStart.ToString('yyyy-MM-dd HH:mm:ss')))
+    if ($global:MatchStart) { [void]$sb.AppendLine((' Match      : {0}  to  {1}' -f $global:MatchStart.ToString('yyyy-MM-dd HH:mm:ss'), $(if ($global:MatchEnd) { $global:MatchEnd.ToString('yyyy-MM-dd HH:mm:ss') } else { '(not finished)' }))) }
+    try { [void]$sb.AppendLine((' Windows    : {0}' -f (Get-CimInstance Win32_OperatingSystem).Caption)) } catch {}
+    [void]$sb.AppendLine('')
+    $auto = @($global:Flags | Where-Object { $_.Category -eq 'Extra screens' -or $_.Points -ge 70 })
+    if ($auto.Count -gt 0) {
+        [void]$sb.AppendLine('!!! AUTO-FLAGS (strongest findings, look at these first) !!!')
+        foreach ($f in ($auto | Sort-Object Points -Descending)) { [void]$sb.AppendLine(('  * [{0}] {1} - {2}' -f $f.Category.ToUpper(), $f.Title, $f.Detail)) }
+        [void]$sb.AppendLine('')
+    }
+    [void]$sb.AppendLine((' OVERALL CONCERN SCORE : {0}%   {1}' -f $overall, (Get-Bar $overall)))
+    [void]$sb.AppendLine((' Reading            : {0}' -f (Get-ScoreBand $overall)))
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine(' What the % means (a heuristic, NOT a proven probability):')
+    [void]$sb.AppendLine('   0-29%  low concern. Under 30% is a good result to accept.')
+    [void]$sb.AppendLine('   30-59% medium. A person should read the bullets below before accepting.')
+    [void]$sb.AppendLine('   60%+   high. Manager decision; look at the evidence and the video.')
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine(' SCORE PER CATEGORY')
+    foreach ($c in $global:FlagCategories.Keys) {
+        $sc = Get-CategoryScore $c
+        [void]$sb.AppendLine(('   {0,-28} {1,3}%  {2}' -f $c, $sc, (Get-Bar $sc)))
+    }
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine(' ROUGH LIKELIHOOD ESTIMATES (heuristic guesses built from the flags above)')
+    $priv = Get-CategoryScore 'Private cheat indicators'
+    $dma  = Get-CategoryScore 'Hardware and DMA'
+    $byp  = [int][Math]::Min(100, (Get-CategoryScore 'Tampering and cleanup') + [Math]::Round((Get-CategoryScore 'Fake or renamed programs') / 2))
+    $cheat= Get-CategoryScore 'Cheat tools and macros'
+    [void]$sb.AppendLine(('   Privately hosted cheat in use   : ~{0}%' -f $priv))
+    [void]$sb.AppendLine(('   DMA / hardware cheat in use     : ~{0}%  (software can only see hints of DMA, a low number does not prove there is none)' -f $dma))
+    [void]$sb.AppendLine(('   Rec-rules bypass / cover-up     : ~{0}%' -f $byp))
+    [void]$sb.AppendLine(('   Cheat or macro tool used        : ~{0}%' -f $cheat))
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('=====================================================================')
+    [void]$sb.AppendLine(' WHAT WAS NOTICED (bullet points, newest category first by score)')
+    [void]$sb.AppendLine('=====================================================================')
+    foreach ($c in ($global:FlagCategories.Keys | Sort-Object { - (Get-CategoryScore $_) })) {
+        $fl = @($global:Flags | Where-Object { $_.Category -eq $c } | Sort-Object Points -Descending)
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine(('{0}  -  {1}%   ({2})' -f $c.ToUpper(), (Get-CategoryScore $c), $global:FlagCategories[$c]))
+        if ($fl.Count -eq 0) { [void]$sb.AppendLine('   - nothing noticed'); continue }
+        foreach ($f in $fl) {
+            [void]$sb.AppendLine(('   - [{0} {1}] {2}  (+{3})' -f $f.Time.ToString('HH:mm:ss'), $f.Phase, $f.Title, $f.Points))
+            if ($f.Detail) { [void]$sb.AppendLine(('       {0}' -f $f.Detail)) }
+        }
+    }
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('=====================================================================')
+    [void]$sb.AppendLine(' LIMITS - things a script on the player PC cannot prove')
+    [void]$sb.AppendLine('=====================================================================')
+    [void]$sb.AppendLine('   - A good DMA card can look like normal hardware. Only hints are shown above.')
+    [void]$sb.AppendLine('   - A cheat that runs inside the Windows kernel can hide from any script like this one.')
+    [void]$sb.AppendLine('   - A flag means "look closer", not "guilty". Some real software is unsigned.')
+    [void]$sb.AppendLine('   - Roblox protects its own memory, so memory/module scans can be blocked (noted below).')
+    if (-not $global:FullChecks) { [void]$sb.AppendLine('   - Tier 1 is camera-only: only the screen check and the file seal run automatically.') }
+    if ($global:ScanNotes.Count -gt 0) {
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine(' SCAN NOTES')
+        foreach ($n in $global:ScanNotes) { [void]$sb.AppendLine("   - $n") }
+    }
+    return $sb.ToString()
+}
+
+function Build-TimelineText {
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('TIMELINE - everything the script saw, oldest first')
+    [void]$sb.AppendLine('Format:  date time | BEFORE/DURING/AFTER the match | source | what happened')
+    [void]$sb.AppendLine(('Match window: {0}  ->  {1}' -f $(if ($global:MatchStart) { $global:MatchStart.ToString('yyyy-MM-dd HH:mm:ss') } else { 'n/a' }), $(if ($global:MatchEnd) { $global:MatchEnd.ToString('yyyy-MM-dd HH:mm:ss') } else { 'n/a' })))
+    [void]$sb.AppendLine('')
+    foreach ($t in ($global:Timeline | Sort-Object Time)) {
+        [void]$sb.AppendLine(('{0} | {1,-6} | {2,-10} | {3}' -f $t.Time.ToString('yyyy-MM-dd HH:mm:ss'), $t.Phase, $t.Source, $t.Detail))
+    }
+    return $sb.ToString()
+}
+
+function Get-FileSha([string]$p) { try { return (Get-FileHash -LiteralPath $p -Algorithm SHA256 -ErrorAction Stop).Hash } catch { return 'UNREADABLE' } }
+
+function Save-FinalPackage {
+    # Writes the reports, adds them to the findings ZIP (or makes one for Tier 1) and seals it.
+    $stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+    $acFolder = Join-Path ([Environment]::GetFolderPath('Desktop')) 'AC-FINDINGS'
+    New-Item -ItemType Directory -Path $acFolder -Force | Out-Null
+    $work = Join-Path $env:TEMP "recrep_$stamp"
+    New-Item -ItemType Directory -Path $work -Force | Out-Null
+
+    $flagsTxt = Build-FlagsText
+    Set-Content -Path (Join-Path $work '00_FLAGS_SUMMARY.txt') -Value $flagsTxt -Encoding UTF8
+    Set-Content -Path (Join-Path $work '00_TIMELINE.txt') -Value (Build-TimelineText) -Encoding UTF8
+    $diff = @(Compare-Snapshots $global:SnapStart $global:SnapEnd)
+    if (-not $global:FullChecks) { $diff = @('Tier 1: snapshot comparison is not used.') }
+    Set-Content -Path (Join-Path $work '00_START_vs_END_CHANGES.txt') -Value (@('Everything that changed between the start-of-match and end-of-match snapshots:', '') + $diff) -Encoding UTF8
+    try { @($global:WatchLog | Select-Object Time, Kind, Name, PID, PPID, Path, Detail) | Export-Csv -Path (Join-Path $work '00_WATCHER_LOG.csv') -NoTypeInformation -Encoding UTF8 } catch {}
+    try { @($global:Flags | Select-Object Time, Phase, Category, Points, Title, Detail) | Export-Csv -Path (Join-Path $work '00_ALL_FLAGS.csv') -NoTypeInformation -Encoding UTF8 } catch {}
+
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zipPath = $global:FindingsZip
+    if (-not $zipPath -or -not (Test-Path $zipPath)) { $zipPath = Join-Path $acFolder "FINDINGS-$stamp.zip" }
+    if (-not (Test-Path $zipPath)) { $z0 = [System.IO.Compression.ZipFile]::Open($zipPath, 'Create'); $z0.Dispose() }
+    $zip = [System.IO.Compression.ZipFile]::Open($zipPath, 'Update')
+    try {
+        foreach ($f in (Get-ChildItem $work -File)) {
+            $old = $zip.GetEntry($f.Name); if ($old) { $old.Delete() }
+            [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $f.FullName, $f.Name)
+        }
+        # seal = SHA256 of every entry as stored in the zip
+        $lines = @('SEAL - SHA256 of every file inside this package (taken when the player finished).',
+                   ('Sealed at: {0}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')),
+                   'To check: unzip, then compare each file hash (Get-FileHash <file>) with the list below.',
+                   'Any file that was edited after the script finished will show a different hash.', '')
+        foreach ($e in ($zip.Entries | Where-Object { $_.FullName -ne 'SEAL.txt' } | Sort-Object FullName)) {
+            $st = $e.Open(); $sha = [System.Security.Cryptography.SHA256]::Create()
+            try { $h = ([BitConverter]::ToString($sha.ComputeHash($st))).Replace('-', '') } finally { $st.Dispose(); $sha.Dispose() }
+            $lines += ('{0}  {1}' -f $h, $e.FullName)
+        }
+        $oldSeal = $zip.GetEntry('SEAL.txt'); if ($oldSeal) { $oldSeal.Delete() }
+        $se = $zip.CreateEntry('SEAL.txt')
+        $w = New-Object System.IO.StreamWriter($se.Open(), (New-Object System.Text.UTF8Encoding($false)))
+        try { foreach ($l in $lines) { $w.WriteLine($l) } } finally { $w.Dispose() }
+    } finally { $zip.Dispose() }
+
+    # loose copies next to the zip so a reviewer can open the summary without unzipping
+    $summaryCopy = Join-Path $acFolder "FLAGS-SUMMARY-$stamp.txt"
+    Copy-Item (Join-Path $work '00_FLAGS_SUMMARY.txt') $summaryCopy -Force
+    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+
+    $global:FindingsZip = $zipPath
+    $global:FlagsCopy = $summaryCopy
+    # the seal text hash (shown on camera) is the hash of SEAL.txt as stored
+    $tmpSeal = Join-Path $env:TEMP "seal_$stamp.txt"
+    $z2 = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+    try { $en = $z2.GetEntry('SEAL.txt'); [System.IO.Compression.ZipFileExtensions]::ExtractToFile($en, $tmpSeal, $true) } finally { $z2.Dispose() }
+    $global:SealHash = Get-FileSha $tmpSeal
+    Remove-Item $tmpSeal -Force -ErrorAction SilentlyContinue
+    $global:ZipHash = Get-FileSha $zipPath
+    $global:FinalOverall = Get-OverallScore
+}
+
+# =========================================================================
 # TIER SELECTION + THEME
 # =========================================================================
 $menuOptions = @(
@@ -157,16 +1217,14 @@ $global:MonitorBaseline  = 1
 $global:MonitorTimer     = $null
 
 function Get-ActiveDisplayCount {
-    try {
-        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
-        $n = [System.Windows.Forms.Screen]::AllScreens.Count
-        if ($n -ge 1) { return $n }
-    } catch {}
-    try {
-        return @(Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue |
-            Where-Object { $_.Availability -eq 3 }).Count
-    } catch {}
-    return 1
+    # Counts the larger of: Windows screens, and monitors the hardware reports.
+    # The hardware count catches MIRRORED / duplicated screens that Windows merges into one.
+    $n = 0; $w = 0
+    try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue; $n = [System.Windows.Forms.Screen]::AllScreens.Count } catch {}
+    try { $w = @(Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction Stop | Where-Object { $_.Active }).Count } catch {}
+    $c = [Math]::Max($n, $w)
+    if ($c -lt 1) { $c = 1 }
+    return $c
 }
 
 function Get-DisplayDetail {
@@ -242,6 +1300,7 @@ function Assert-SingleDisplay {
                 Write-Host ("        - {0} {1} {2}" -f $_.DeviceName, $_.Bounds, $(if ($_.Primary) { "(primary)" } else { "" })) -ForegroundColor Red
             }
             Write-Host "      Waiting for it to be unplugged..." -ForegroundColor Yellow
+            Add-Flag 'Extra screens' 100 'More than one screen was connected during set-up' "$count displays"
             $warned = $true
         }
         Start-Sleep -Seconds 2
@@ -279,14 +1338,8 @@ $requiredTools = @(
         Probe = { Find-Exe @("MBAM.exe", "Malwarebytes.exe", "mbam.exe") @("$env:ProgramFiles\Malwarebytes\Anti-Malware", "$env:ProgramFiles\Malwarebytes", "${env:ProgramFiles(x86)}\Malwarebytes") }
     },
     @{
-        Name  = "MOSS"
-        Url   = "https://nohope.eu/down/MossX645.zip"
-        Note  = "extract the zip before running"
-        Probe = { Find-Exe @("MOSS.exe", "MOSSX64.exe", "MossX645.exe") $searchDirs }
-    },
-    @{
         Name  = "Autoruns"
-        Url   = "http://live.sysinternals.com/autoruns.exe"
+        Url   = "https://live.sysinternals.com/autoruns.exe"
         Note  = "run as Administrator"
         Probe = { Find-Exe @("autoruns64.exe", "autoruns.exe") $searchDirs }
     }
@@ -818,388 +1871,99 @@ function Invoke-MalwarebytesVerification {
 }
 
 # =========================================================================
-# MOSS: VERIFIED EXCLUSION (must run for the whole match)
-# =========================================================================
-# MOSS has to stay running all match, so like Malwarebytes it gets excluded
-# from the cleanup - but only after verification.
-#
-# IMPORTANT, READ THIS: the official MossX645.zip is AES-encrypted, so the
-# SHA256 of the real MossX64.exe could not be extracted to embed here. That
-# means MOSS is verified WEAKER than Malwarebytes:
-#   Malwarebytes = install path + valid signature + publisher match  (strong)
-#   MOSS         = filename + exact byte size + logged hash          (weaker)
-# Exact byte size is a real check (it catches a repacked or patched binary),
-# but it is forgeable by anyone who pads a file to the same length. Until the
-# hash below is filled in, treat MOSS exclusion as "probably genuine",
-# not "proven genuine", and rely on the on-camera MOSS session as well.
-#
-# TO UPGRADE THIS TO A REAL HASH CHECK:
-#   1. extract MossX645.zip with the league password
-#   2. run:  Get-FileHash .\MossX64.exe -Algorithm SHA256
-#   3. paste the hash into $MossKnownHashes below
-$MossProcessNames = @("MOSS", "MOSSX64", "MossX645", "MOSSCapture")
-
-# Known-good metadata taken from the official MossX645.zip central directory.
-$MossKnownFileName = "MossX64.exe"
-$MossKnownSize     = 4220416          # bytes, from the official archive
-$MossKnownZipSha   = "814824D4C279772A05C8A2E35E8F1E09B2CE4CBD682583A16A8E04F7D5E67637"
-
-# Empty until someone extracts the archive and fills it in (see note above).
-$MossKnownHashes = @(
-    # "PASTE_SHA256_OF_MossX64.exe_HERE"
-)
-
-function Test-GenuineMoss($proc) {
-    $r = [PSCustomObject]@{
-        Name        = $proc.ProcessName
-        PID         = $proc.Id
-        Path        = $null
-        SizeBytes   = $null
-        SizeMB      = $null
-        FileName    = $null
-        NameOK      = $false
-        SizeOK      = $false
-        SignatureStatus = $null
-        Publisher   = $null
-        SHA256      = $null
-        KnownBuild  = $false
-        Genuine     = $false
-        Reason      = @()
-    }
-
-    try { $r.Path = $proc.Path } catch {}
-    if (-not $r.Path) { $r.Reason += "executable path unavailable"; return $r }
-
-    try {
-        $fi = Get-Item -LiteralPath $r.Path -ErrorAction Stop
-        $r.SizeBytes = $fi.Length
-        $r.SizeMB    = [math]::Round($fi.Length / 1MB, 3)
-        $r.FileName  = $fi.Name
-    } catch { $r.Reason += "could not stat file"; return $r }
-
-    $r.NameOK = ($r.FileName -ieq $MossKnownFileName)
-    if (-not $r.NameOK) { $r.Reason += "filename '$($r.FileName)' is not $MossKnownFileName" }
-
-    $r.SizeOK = ($r.SizeBytes -eq $MossKnownSize)
-    if (-not $r.SizeOK) { $r.Reason += "size $($r.SizeBytes) bytes != official $MossKnownSize bytes" }
-
-    try {
-        $sig = Get-AuthenticodeSignature -FilePath $r.Path -ErrorAction Stop
-        $r.SignatureStatus = $sig.Status
-        if ($sig.SignerCertificate) { $r.Publisher = $sig.SignerCertificate.Subject }
-    } catch { $r.SignatureStatus = "unreadable" }
-
-    try { $r.SHA256 = (Get-FileHash -Path $r.Path -Algorithm SHA256 -ErrorAction Stop).Hash } catch {}
-
-    if ($MossKnownHashes.Count -gt 0) {
-        # Hash list populated: this becomes the authoritative gate.
-        $r.KnownBuild = ($MossKnownHashes -contains $r.SHA256)
-        $r.Genuine    = $r.KnownBuild
-        if (-not $r.KnownBuild) { $r.Reason += "SHA256 does not match any known-good MOSS build" }
-    } else {
-        # No hash on file: fall back to name + exact size.
-        $r.Genuine = ($r.NameOK -and $r.SizeOK)
-        $r.Reason += "no MOSS hash on file - verified by name+size only (weaker)"
-    }
-
-    return $r
-}
-
-function Invoke-MossVerification {
-    Section "MOSS Integrity Verification"
-
-    $candidates = @()
-    foreach ($n in $MossProcessNames) {
-        $candidates += Get-Process -Name $n -ErrorAction SilentlyContinue
-    }
-    $candidates = $candidates | Sort-Object Id -Unique
-
-    $global:MossVerified = @()
-    $global:MossRejected = @()
-
-    if (-not $candidates) {
-        if ($tier -in @('2','3')) {
-            Write-Host "MOSS is not running yet - it is started later in the Before Launching steps." -ForegroundColor DarkYellow
-        } else {
-            Write-Host "MOSS not running (not required for Tier 1)." -ForegroundColor Gray
-        }
-        $global:MossWhitelist = @()
-        return
-    }
-
-    if ($MossKnownHashes.Count -eq 0) {
-        Write-Host "NOTE: no MOSS SHA256 on file (official zip is encrypted)." -ForegroundColor DarkYellow
-        Write-Host "      Falling back to filename + exact byte size. This is weaker than a hash check." -ForegroundColor DarkYellow
-        Write-Host ""
-    }
-
-    foreach ($proc in $candidates) {
-        $v = Test-GenuineMoss $proc
-        if ($v.Genuine) {
-            $global:MossVerified += $v
-            Write-Host ("  OK    {0,-24} PID {1,-7} {2} MB  sig={3}" -f $v.Name, $v.PID, $v.SizeMB, $v.SignatureStatus) -ForegroundColor Green
-            Write-Host ("        sha256: {0}" -f $v.SHA256) -ForegroundColor DarkGray
-        } else {
-            $global:MossRejected += $v
-            Write-Host ("  FAIL  {0,-24} PID {1,-7} {2}" -f $v.Name, $v.PID, ($v.Reason -join "; ")) -ForegroundColor Red
-            Write-Host ("        path: {0}" -f $v.Path) -ForegroundColor Red
-        }
-    }
-
-    $global:MossWhitelist = @($global:MossVerified | ForEach-Object { $_.Name.ToLower() } | Select-Object -Unique)
-
-    Write-Host ""
-    if ($global:MossRejected.Count -gt 0) {
-        Write-Host "WARNING: $($global:MossRejected.Count) process(es) named like MOSS failed verification." -ForegroundColor Red
-        Write-Host "They will NOT be excluded from closing and are flagged in the report." -ForegroundColor Red
-    }
-    Write-Host "Verified MOSS components excluded from closing: $($global:MossWhitelist.Count)" -ForegroundColor Green
-}
-
-function Get-MossWhitelist {
-    # Re-verify at cleanup time: MOSS is usually launched partway through the
-    # run, so the earlier pass may have found nothing.
-    Invoke-MossVerification | Out-Null
-    return @($global:MossWhitelist)
-}
-
-# =========================================================================
-# STAGE: CLOSE NON-ESSENTIAL PROCESSES
+# STAGE: CLOSE NON-ESSENTIAL PROCESSES (identity-checked - names alone never protect a program)
 # =========================================================================
 function Invoke-CloseNonEssential {
     Section "Close Non-Essential Processes"
+    Add-TL 'CLEANUP' 'Cleanup stage started'
 
-    $systemWhitelist = @(
-        "System","Idle","Registry","smss","csrss","wininit","winlogon","services","lsass","lsm",
-        "svchost","dwm","explorer","fontdrvhost","RuntimeBroker","sihost","taskhostw","ctfmon",
-        "conhost","dllhost","WUDFHost","SearchIndexer","SearchHost","StartMenuExperienceHost",
-        "ShellExperienceHost","ApplicationFrameHost","TextInputHost","spoolsv","audiodg",
-        "powershell","pwsh","WindowsTerminal","OpenConsole","cmd","netsh","Secure System","Memory Compression"
-    )
+    # Scan FIRST so a renamed/fake program is recorded before it gets closed.
+    Write-Host "Checking running programs (this takes a moment)..." -ForegroundColor Gray
+    Invoke-AllScans 'PRE-CLEANUP'
 
-    $robloxWhitelist = @("RobloxPlayerBeta","RobloxPlayerLauncher","RobloxCrashHandler")
-    $mossWhitelist   = @(Get-MossWhitelist)
+    $procs = @(Get-ProcTable | Sort-Object Name, PID)
+    $selfPid = $PID
 
-    $whitelistMap = @{}
-    foreach ($n in $systemWhitelist)                 { $whitelistMap[$n.ToLower()] = "core Windows process" }
-    foreach ($n in $robloxWhitelist)                 { $whitelistMap[$n.ToLower()] = "Roblox (the game being recorded)" }
-    foreach ($n in $global:RecorderWhitelist)        { $whitelistMap[$n.ToLower()] = "recording software ($global:RecorderFamily)" }
-    foreach ($n in $global:MalwarebytesWhitelist)    { $whitelistMap[$n.ToLower()] = "Malwarebytes (signature-verified)" }
-    foreach ($n in $mossWhitelist)                   { $whitelistMap[$n.ToLower()] = "MOSS (must run for whole match)" }
-    foreach ($n in @($global:justifiedExtras))       { if ($n) { $whitelistMap[$n.ToLower()] = "user-justified on camera" } }
-
-    # Exclusions are recorded to the findings package (10_excluded_from_closing),
-    # not printed here - keeps the console readable during the live run.
-
-    $allProcs = @(Get-Process | Sort-Object ProcessName, Id)
-    $selfPid  = $PID
-
-    # One bulk WMI pass instead of querying per-process - faster and this is
-    # the reliable source Get-ProcPathSafe checks first.
-    $global:CimPathMap = @{}
-    try {
-        Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
-            if ($_.ExecutablePath) { $global:CimPathMap[[int]$_.ProcessId] = $_.ExecutablePath }
-        }
-    } catch {}
-
-    # ---- duplicate instance detection (runs across EVERY process) ----
-    $dupGroups = $allProcs | Group-Object ProcessName | Where-Object { $_.Count -gt 1 }
+    # --- duplicate instances ---
     $global:DuplicateReport = @()
-    foreach ($g in $dupGroups) {
+    $dups = $procs | Group-Object Name | Where-Object { $_.Count -gt 1 }
+    foreach ($g in $dups) {
         foreach ($p in $g.Group) {
-            $path = Get-ProcPathSafe $p
-            $st = $null
-            try { $st = $p.StartTime } catch {}
-            $global:DuplicateReport += [PSCustomObject]@{
-                Name          = $g.Name
-                InstanceCount = $g.Count
-                PID           = $p.Id
-                Path          = $path
-                SizeMB        = Get-SizeMB $path
-                StartTime     = $st
-                Whitelisted   = $whitelistMap.ContainsKey($g.Name.ToLower())
-            }
+            $global:DuplicateReport += [PSCustomObject]@{ Name = $g.Name; InstanceCount = $g.Count; PID = $p.PID; Path = $p.Path
+                SizeMB = Get-SizeMB $p.Path; StartTime = $p.Created; Whitelisted = (Get-ProcVerdict $p.Name $p.Path).Spare }
         }
     }
-    if ($dupGroups) {
-        Write-Host "Processes running with MULTIPLE instances:" -ForegroundColor Yellow
-        foreach ($g in $dupGroups) {
-            Write-Host ("  {0,-28} x{1}  (PIDs: {2})" -f $g.Name, $g.Count, (($g.Group | ForEach-Object { $_.Id }) -join ', ')) -ForegroundColor Yellow
-        }
+    if ($dups) {
+        Write-Host "Programs running with MULTIPLE instances:" -ForegroundColor Yellow
+        foreach ($g in $dups) { Write-Host ("  {0,-28} x{1}" -f $g.Name, $g.Count) -ForegroundColor Yellow }
         Write-Host ""
     }
 
-    # ---- build excluded list with full detail ----
     $global:ExcludedReport = @()
-    foreach ($p in $allProcs) {
-        $key = $p.ProcessName.ToLower()
-        $path = Get-ProcPathSafe $p
-        $isRecorderPath = Test-IsRecorderPath $path
-        if ($whitelistMap.ContainsKey($key) -or $isRecorderPath -or $p.Id -eq $selfPid) {
-            $signed = $null
-            $publisher = $null
-            if ($path) {
-                try {
-                    $sig = Get-AuthenticodeSignature -FilePath $path -ErrorAction Stop
-                    $signed = $sig.Status
-                    if ($sig.SignerCertificate) { $publisher = $sig.SignerCertificate.Subject }
-                } catch { $signed = "unreadable" }
-            }
-            $reason =
-                if ($p.Id -eq $selfPid) { "this script's own PowerShell process" }
-                elseif ($whitelistMap.ContainsKey($key)) { $whitelistMap[$key] }
-                else { "recording software (running from vendor install directory: $path)" }
-            $global:ExcludedReport += [PSCustomObject]@{
-                Name      = $p.ProcessName
-                PID       = $p.Id
-                Path      = $path
-                SizeMB    = Get-SizeMB $path
-                Signature = $signed
-                Publisher = $publisher
-                Reason    = $reason
-            }
+    $candidates = @()
+    foreach ($p in $procs) {
+        $v = Get-ProcVerdict $p.Name $p.Path
+        $sig = Get-SigInfo $p.Path
+        if ($p.PID -eq $selfPid -or $v.Spare) {
+            $global:ExcludedReport += [PSCustomObject]@{ Name = $p.Name; PID = $p.PID; Path = $p.Path; SizeMB = Get-SizeMB $p.Path
+                Signature = $sig.Status; Publisher = $sig.Publisher
+                Reason = $(if ($p.PID -eq $selfPid) { "this script's own process" } else { "$($v.Class): $($v.Reason)" }) }
+        } else {
+            $candidates += [PSCustomObject]@{ P = $p; V = $v; Sig = $sig }
         }
     }
 
-    $candidates = @($allProcs | Where-Object {
-        $path = Get-ProcPathSafe $_
-        $_.Id -ne $selfPid -and
-        (-not $whitelistMap.ContainsKey($_.ProcessName.ToLower())) -and
-        (-not (Test-IsRecorderPath $path))
-    })
-
     if (-not $candidates) {
-        Write-Host "Nothing to close - only excluded processes are running." -ForegroundColor Gray
+        Write-Host "Nothing to close - only verified programs are running." -ForegroundColor Gray
         $global:CloseLog = @()
         return
     }
 
-    Write-Host "Found $($candidates.Count) non-essential process(es). Closing..." -ForegroundColor Cyan
+    Write-Host "Closing $($candidates.Count) program(s) that are not verified Windows / Roblox / recorder / Malwarebytes..." -ForegroundColor Cyan
     Write-Host ""
-
     $log = @()
-
-    foreach ($proc in $candidates) {
-        $path = $null
-        $signed = $null
-        $publisher = $null
-        $suspicious = $false
+    foreach ($c in $candidates) {
+        $p = $c.P; $v = $c.V; $sig = $c.Sig
         $reason = @()
-        $status = "Unknown"
-        $startTime = $null
+        $susp = $false
+        if ($v.Impersonation) { $susp = $true; $reason += $v.Reason }
+        if ($sig.Status -ne 'Valid' -and $p.Path) { $susp = $true; $reason += "unsigned or invalid signature ($($sig.Status))" }
+        if (Test-UserWritablePath $p.Path) { $susp = $true; $reason += 'running from a temp/downloads/desktop/appdata folder' }
+        if (-not $p.Path) { $reason += 'path unavailable' }
 
-        try { $path = $proc.Path } catch { $path = $null }
-        try { $startTime = $proc.StartTime } catch {}
-        $sizeMB = Get-SizeMB $path
-
-        if ($path) {
+        $status = 'Unknown'
+        try { Stop-Process -Id $p.PID -Force -ErrorAction Stop; $status = 'Closed' }
+        catch {
             try {
-                $sig = Get-AuthenticodeSignature -FilePath $path -ErrorAction Stop
-                $signed = ($sig.Status -eq "Valid")
-                if ($sig.SignerCertificate) { $publisher = $sig.SignerCertificate.Subject }
-            } catch { $signed = $false }
-
-            if (-not $signed) { $suspicious = $true; $reason += "unsigned or invalid signature" }
-            if ($path -match '\\(Temp|Downloads|AppData\\Local\\Temp)\\') {
-                $suspicious = $true; $reason += "running from a temp/downloads folder"
-            }
-            # anything pretending to be Malwarebytes but not verified
-            if ($MalwarebytesProcessNames -contains $proc.ProcessName) {
-                $suspicious = $true; $reason += "named like Malwarebytes but FAILED verification"
-            }
-            if ($MossProcessNames -contains $proc.ProcessName) {
-                $suspicious = $true; $reason += "named like MOSS but FAILED verification"
-            }
-        } else {
-            $reason += "path unavailable"
-        }
-
-        try {
-            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-            $status = "Closed"
-        } catch {
-            try {
-                $servicesForPid = Get-CimInstance Win32_Service -Filter "ProcessId = $($proc.Id)" -ErrorAction Stop
-                if ($servicesForPid) {
-                    $stoppedServiceNames = @()
-                    foreach ($svc in $servicesForPid) {
-                        try {
-                            $service = Get-Service -Name $svc.Name -ErrorAction Stop
-                            if ($service.Status -ne "Stopped") {
-                                Stop-Service -Name $svc.Name -Force -ErrorAction Stop
-                                $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(10))
-                            }
-                            $stoppedServiceNames += $svc.Name
-                        } catch { }
-                    }
-                    Start-Sleep -Milliseconds 500
-                    if (-not (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue)) {
-                        if ($stoppedServiceNames.Count -gt 0) {
-                            $status = "Closed (service stopped: $($stoppedServiceNames -join ', '))"
-                        } else {
-                            $status = "Service found, but could not be stopped"
-                        }
-                    } else {
-                        try {
-                            $tkOut = & taskkill /F /PID $proc.Id 2>&1
-                            if ($LASTEXITCODE -eq 0) { $status = "Closed (service stopped + taskkill)" }
-                            else { $status = "Failed to close: $tkOut" }
-                        } catch { $status = "Failed to close: $($_.Exception.Message)" }
-                    }
-                } else {
-                    try {
-                        $tkOut = & taskkill /F /PID $proc.Id 2>&1
-                        if ($LASTEXITCODE -eq 0) { $status = "Closed (via taskkill fallback)" }
-                        else { $status = "Failed to close: $tkOut" }
-                    } catch { $status = "Failed to close: $($_.Exception.Message)" }
+                $svcs = @(Get-CimInstance Win32_Service -Filter "ProcessId = $($p.PID)" -ErrorAction Stop)
+                foreach ($s in $svcs) { try { Stop-Service -Name $s.Name -Force -ErrorAction Stop } catch {} }
+                Start-Sleep -Milliseconds 500
+                if (-not (Get-Process -Id $p.PID -ErrorAction SilentlyContinue)) { $status = "Closed (service stopped: $(($svcs | ForEach-Object { $_.Name }) -join ', '))" }
+                else {
+                    $tk = & taskkill /F /PID $p.PID 2>&1
+                    if ($LASTEXITCODE -eq 0) { $status = 'Closed (via taskkill)' } else { $status = "Failed to close: $tk" }
                 }
             } catch { $status = "Failed to close: $($_.Exception.Message)" }
         }
-
-        $log += [PSCustomObject]@{
-            Name       = $proc.ProcessName
-            PID        = $proc.Id
-            Path       = $path
-            SizeMB     = $sizeMB
-            Signed     = $signed
-            Publisher  = $publisher
-            StartTime  = $startTime
-            Suspicious = $suspicious
-            Notes      = ($reason -join "; ")
-            Status     = $status
+        $log += [PSCustomObject]@{ Name = $p.Name; PID = $p.PID; Path = $p.Path; SizeMB = Get-SizeMB $p.Path
+            Signed = ($sig.Status -eq 'Valid'); Publisher = $sig.Publisher; StartTime = $p.Created
+            Suspicious = $susp; Notes = ($reason -join '; '); Status = $status }
+        $col = if ($status -like 'Closed*') { 'Green' } else { 'DarkYellow' }
+        Write-Host ("{0,-25} PID {1,-7} {2}" -f $p.Name, $p.PID, $status) -ForegroundColor $col
+        Add-TL 'CLEANUP' ("{0} (PID {1}) {2} -> {3}" -f $p.Name, $p.PID, $p.Path, $status)
+        if ($status -notlike 'Closed*') {
+            Add-Flag 'Activity during match' 10 'A program could not be closed during cleanup' ("{0} (PID {1}) {2}: {3}" -f $p.Name, $p.PID, $p.Path, $status)
         }
-
-        $color = if ($suspicious) { "Red" } elseif ($status -like "Closed*") { "Green" } elseif ($status -like "Failed*") { "DarkYellow" } else { "Gray" }
-        Write-Host ("{0,-25} PID {1,-7} {2,-9} {3}" -f $proc.ProcessName, $proc.Id, "$sizeMB MB", $status) -ForegroundColor $color
     }
-
     $global:CloseLog = $log
 
     Write-Host ""
-    $suspiciousCount = @($log | Where-Object { $_.Suspicious }).Count
-    $closedCount     = @($log | Where-Object { $_.Status -like "Closed*" }).Count
-    $failedCount     = @($log | Where-Object { $_.Status -notlike "Closed*" }).Count
-
-    Write-Host "Closed $closedCount of $($candidates.Count); $failedCount could not be closed; $suspiciousCount flagged." -ForegroundColor Green
-
-    if ($failedCount -gt 0) {
-        Write-Host ""
-        Write-Host "Could NOT be closed (these stay running - explain them on camera):" -ForegroundColor DarkYellow
-        $log | Where-Object { $_.Status -notlike "Closed*" } | ForEach-Object {
-            Write-Host ("  {0} (PID {1}) {2} MB - {3}" -f $_.Name, $_.PID, $_.SizeMB, $_.Path) -ForegroundColor DarkYellow
-        }
-    }
-
-    if ($suspiciousCount -gt 0) {
-        Write-Host ""
-        Write-Host "Flagged processes:" -ForegroundColor Red
-        $log | Where-Object { $_.Suspicious } | ForEach-Object {
-            Write-Host ("  {0} (PID {1}) {2} MB - {3}" -f $_.Name, $_.PID, $_.SizeMB, $_.Path) -ForegroundColor Red
-            Write-Host ("    Reason: {0}" -f $_.Notes) -ForegroundColor Red
-        }
-        Write-Host ""
-        Write-Host "A flag is not proof of malicious activity; some legitimate tools are unsigned." -ForegroundColor Yellow
+    $closed = @($log | Where-Object { $_.Status -like 'Closed*' }).Count
+    Write-Host "Closed $closed of $($candidates.Count)." -ForegroundColor Green
+    $failed = @($log | Where-Object { $_.Status -notlike 'Closed*' })
+    if ($failed.Count -gt 0) {
+        Write-Host "Could NOT be closed (explain them on camera):" -ForegroundColor DarkYellow
+        foreach ($f in $failed) { Write-Host ("  {0} (PID {1}) {2}" -f $f.Name, $f.PID, $f.Path) -ForegroundColor DarkYellow }
     }
 }
 
@@ -1632,26 +2396,6 @@ function Invoke-FindingsCollector {
             }
 
             ""
-            "--- MOSS verification result ---"
-            if (@($MossVerified | Where-Object { $_ }).Count -gt 0) {
-                "  SUCCESS: $(@($MossVerified).Count) verified MOSS process(es) excluded from closing"
-                $MossVerified | ForEach-Object {
-                    "    {0} (PID {1}) {2} MB  knownBuild={3}`n      path: {4}`n      size: {5} bytes`n      signature: {6}`n      sha256: {7}`n      note: {8}" -f `
-                        $_.Name, $_.PID, $_.SizeMB, $_.KnownBuild, $_.Path, $_.SizeBytes, $_.SignatureStatus, $_.SHA256, ($_.Reason -join "; ")
-                }
-            } else {
-                "  INFO: no MOSS process passed verification (or MOSS was not running)"
-            }
-            if (@($MossRejected | Where-Object { $_ }).Count -gt 0) {
-                ""
-                "  WARNING: $(@($MossRejected).Count) process(es) named like MOSS FAILED verification and were NOT excluded:"
-                $MossRejected | ForEach-Object {
-                    "    {0} (PID {1})`n      path: {2}`n      size: {3} bytes`n      reason: {4}" -f `
-                        $_.Name, $_.PID, $_.Path, $_.SizeBytes, ($_.Reason -join "; ")
-                }
-            }
-
-            ""
             "--- Malwarebytes services ---"
             Get-Service -Name "MBAMService","MBAMProtection","mbamchameleon","MBVpnTunnelService" -ErrorAction SilentlyContinue |
                 ForEach-Object { "  {0}: {1}" -f $_.Name, $_.Status }
@@ -1867,15 +2611,7 @@ function Step-Autoruns {
     Section "Sysinternals Autoruns"
     $exe = Find-Exe @("autoruns64.exe", "autoruns.exe") $searchDirs
     if ($exe) { Start-Process $exe -Verb RunAs } else { Write-Host "Launch Autoruns manually as Administrator." -ForegroundColor DarkYellow }
-    Pause-ForCamera "Stay in the'Everything' tab, wait for the scan (botton left), when it says 'Ready', scroll slowly top to bottom."
-}
-
-function Step-Moss {
-    Section "MOSS"
-    $exe = Find-Exe @("MOSS.exe", "MOSSX64.exe", "MossX645.exe") $searchDirs
-    if ($exe) { Start-Process $exe } else { Write-Host "Launch MOSS manually." -ForegroundColor DarkYellow }
-    Write-Host "MOSS is excluded from the process cleanup and must stay running all match." -ForegroundColor Green
-    Pause-ForCamera "File > Parameters > Pick Roblox > OK > Capture > Start."
+    Pause-ForCamera "Stay in the 'Everything' tab, wait for the scan (bottom left), when it says 'Ready', scroll slowly top to bottom."
 }
 
 function Step-DeviceManager {
@@ -1952,7 +2688,7 @@ function Step-UnnecessarySoftwareCheck {
 function Step-ProxyLock {
     Section "WinHTTP Proxy Lock"
     if (-not (Get-Job -Name "ProxyLock" -ErrorAction SilentlyContinue)) {
-        Start-Job -Name "ProxyLock" -ScriptBlock { while ($true) { netsh winhttp set proxy 127.0.0.1:1 | Out-Null } } | Out-Null
+        Start-Job -Name "ProxyLock" -ScriptBlock { while ($true) { netsh winhttp set proxy 127.0.0.1:1 | Out-Null; Start-Sleep -Seconds 2 } } | Out-Null
     }
     Write-Host "Proxy lock is ACTIVE - just continue." -ForegroundColor Green
     Write-Host "Keep this window open until your match is over." -ForegroundColor Red
@@ -2001,7 +2737,6 @@ function Invoke-BeforeLaunching([switch]$Repeat) {
     Step-TrayIcons
     if ($tier -in @('2','3')) {
         Step-Autoruns
-        if (-not $Repeat) { Step-Moss }
     }
     if ($tier -eq '3') { Step-DeviceManager }
     Step-UAC
@@ -2045,9 +2780,12 @@ if ($confirm -notmatch '^[Yy]') {
     return
 }
 
+$global:FullChecks = ($tier -ne '1')
+Start-MatchWatcher
+Add-TL 'SESSION' "Script started, tier $tier"
 if ($tier -in @('2','3')) { Invoke-ToolCheck }
 Invoke-Prerequisites
-if ($global:AbortRun) { return }
+if ($global:AbortRun) { Stop-MatchWatcher; return }
 if ($tier -in @('2','3')) {
     Invoke-RecorderSetup
     Invoke-MalwarebytesVerification
@@ -2056,7 +2794,7 @@ if ($tier -in @('2','3')) {
 if (($tier -in @('2','3')) -or $global:StrapRemoved) {
     if ($tier -eq '1') { Write-Host "Strap was removed - the official Roblox must be reinstalled." -ForegroundColor $theme.Accent }
     $ok = Invoke-RobloxReinstall
-    if (-not $ok) { Stop-MonitorWatchdog; return }
+    if (-not $ok) { Stop-MonitorWatchdog; Stop-MatchWatcher; return }
     Invoke-FpsUncap
     Section "Please complete the Before Launching steps now."
 } else {
@@ -2070,7 +2808,15 @@ if ($tier -in @('2','3')) {
     Invoke-CloseNonEssential
     Show-ReopenWarning
     Step-TaskManager -After
+    $global:SnapStart = Get-Snapshot 'START'
+    $global:MatchStart = Get-Date
+    Add-TL 'MATCH' 'Match window opened (start-of-match snapshot taken)'
     Invoke-FindingsCollector
+} else {
+    Invoke-AllScans 'TIER1-START'
+    $global:SnapStart = Get-Snapshot 'START'
+    $global:MatchStart = Get-Date
+    Add-TL 'MATCH' 'Match window opened (Tier 1)'
 }
 
 Write-Host ""
@@ -2086,7 +2832,12 @@ while ($ready -notmatch '^(y|yes|done)$') {
     $ready = Read-Host "When your match is completely finished, type DONE to start the end-of-match checks"
 }
 
+$global:MatchEnd = Get-Date
+Add-TL 'MATCH' 'Player typed DONE - match window closed'
 Section "After Match Is Finished"
+Write-Host "Collecting end-of-match data - please wait..." -ForegroundColor Gray
+Invoke-AllScans 'END-OF-MATCH'
+$global:SnapEnd = Get-Snapshot 'END'
 Show-MonitorAlertIfAny
 Invoke-BeforeLaunching -Repeat
 Invoke-AfterLaunching -Repeat
@@ -2111,16 +2862,33 @@ if ($global:MonitorLog.Count -gt 1) {
 }
 Stop-MonitorWatchdog
 
+# ---- finish: turn the watcher log into the flags report, then seal the package ----
+Section "Sealing Findings"
+Stop-MatchWatcher
+Convert-WatchLog
+foreach ($l in @($global:MonitorLog)) {
+    Add-TL 'DISPLAY' $l
+    if ($l -match 'DISPLAY COUNT CHANGED: (\d+) -> (\d+)' -and [int]$matches[2] -gt 1) { Add-Flag 'Extra screens' 100 'A second screen appeared during the session' $l }
+}
+Save-FinalPackage
+Write-Host "Findings package sealed: $global:FindingsZip" -ForegroundColor Green
+Write-Host ""
+Write-Host "SHOW THIS ON CAMERA (it proves the files were not edited afterwards):" -ForegroundColor Yellow
+Write-Host "  ZIP  SHA256 : $global:ZipHash" -ForegroundColor White
+Write-Host "  SEAL SHA256 : $global:SealHash" -ForegroundColor White
+Write-Host "  Sealed at   : $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor White
+Write-Host ""
+Read-Host "Press Enter once the values above are shown on your recording"
+
 if ($tier -in @('2','3')) {
     Section "Uploads"
     $zipDir = Join-Path ([Environment]::GetFolderPath('Desktop')) "AC-FINDINGS"
     if (Test-Path $zipDir) { Start-Process "explorer.exe" -ArgumentList $zipDir }
     Write-Host "Do these IN ORDER while still recording:" -ForegroundColor $theme.Accent
-    Write-Host "  1. Upload the ZIP from AC-FINDINGS to 'ow-submissions'." -ForegroundColor White
-    Write-Host "  2. End your MOSS session." -ForegroundColor White
-    Write-Host "  3. Upload the MOSS file from the 'MOSS' folder to 'ow-submissions'." -ForegroundColor White
-    Read-Host "Press Enter once all 3 are done"
+    Write-Host "  1. Upload the ZIP from AC-FINDINGS to 'ow-submissions' (do NOT open or edit it first)." -ForegroundColor White
+    Read-Host "Press Enter once the upload is done"
     Write-Host "You may now stop your recording, then upload it to YouTube and post the link in 'ow-submissions'." -ForegroundColor $theme.Header
 } else {
+    Write-Host "A sealed file was saved in the AC-FINDINGS folder on your Desktop - keep it, staff may ask for it." -ForegroundColor Gray
     Write-Host "=== TIER 1 CHECKS COMPLETE - YOU MAY NOW STOP YOUR RECORDING ===" -ForegroundColor $theme.Header
 }
