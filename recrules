@@ -182,8 +182,12 @@ $global:TrustRules = @(
        Path  = '(?i)^[a-z]:\\windows\\|\\programdata\\microsoft\\windows defender\\|\\program files( \(x86\))?\\windows defender\\|\\program files\\powershell\\|\\program files\\windowsapps\\microsoft\.|\\program files( \(x86\))?\\microsoft\\edgewebview\\'
        Pub   = 'Microsoft' }
     @{ Class = 'Roblox'; Spare = $true
-       Names = '^(robloxplayerbeta|robloxplayerlauncher|robloxcrashhandler|robloxplayerinstaller)$'
+       Names = '^(robloxplayerbeta|robloxplayerlauncher|robloxcrashhandler)$'
        Path  = '(?i)\\appdata\\local\\roblox\\|\\program files( \(x86\))?\\roblox\\'
+       Pub   = 'Roblox' }
+    @{ Class = 'Roblox'; Spare = $false
+       Names = '^(robloxplayerinstaller|roblox ?installer)$'
+       Path  = '.*'
        Pub   = 'Roblox' }
     @{ Class = 'OBS'; Spare = $true; AllowUnsigned = $true
        Names = '^(obs64|obs32|obs-browser-page|obs-ffmpeg-mux|obs-ffmpeg-mux32|obs-amf-test|obs-nvenc-test|obs-qsv-test|get-graphics-offsets64|get-graphics-offsets32|inject-helper64|inject-helper32)$'
@@ -191,7 +195,7 @@ $global:TrustRules = @(
        Pub   = 'OBS|Open Broadcaster' }
     @{ Class = 'NVIDIA'; Spare = $true
        Names = '^(nv.*|nvidia.*|gfexperience.*|geforce.*|share|nvcplui|nvdisplay\.container)$'
-       Path  = '(?i)\\nvidia( corporation)?\\|\\driverstore\\filerepository\\nv|\\windows\\system32\\'
+       Path  = '(?i)\\nvidia[^\\]*\\|\\driverstore\\filerepository\\nv|\\windows\\system32\\'
        Pub   = 'NVIDIA' }
     @{ Class = 'AMD'; Spare = $true
        Names = '^(radeon.*|amd.*|cncmd|ati.*|atieclxx|atiesrxx|rsserv.*)$'
@@ -263,18 +267,29 @@ function Get-ProcVerdict([string]$name, [string]$path) {
 
 # Levenshtein distance - catches look-alike names such as svch0st / expl0rer
 function Get-EditDistance([string]$a, [string]$b) {
+    # two-row version (no 2D arrays, works in Windows PowerShell 5.1)
     $m = $a.Length; $n = $b.Length
-    if ($m -eq 0) { return $n }; if ($n -eq 0) { return $m }
-    $d = New-Object 'int[,]' ($m + 1), ($n + 1)
-    for ($i = 0; $i -le $m; $i++) { $d[$i, 0] = $i }
-    for ($j = 0; $j -le $n; $j++) { $d[0, $j] = $j }
+    if ($m -eq 0) { return $n }
+    if ($n -eq 0) { return $m }
+    $prev = New-Object 'int[]' ($n + 1)
+    $cur  = New-Object 'int[]' ($n + 1)
+    for ($j = 0; $j -le $n; $j++) { $prev[$j] = $j }
     for ($i = 1; $i -le $m; $i++) {
+        $cur[0] = $i
         for ($j = 1; $j -le $n; $j++) {
-            $cost = if ($a[$i - 1] -eq $b[$j - 1]) { 0 } else { 1 }
-            $d[$i, $j] = [Math]::Min([Math]::Min($d[($i - 1), $j] + 1, $d[$i, ($j - 1)] + 1), $d[($i - 1), ($j - 1)] + $cost)
+            $cost = 1
+            if ($a[$i - 1] -eq $b[$j - 1]) { $cost = 0 }
+            $del = $prev[$j] + 1
+            $ins = $cur[$j - 1] + 1
+            $sub = $prev[$j - 1] + $cost
+            $best = $del
+            if ($ins -lt $best) { $best = $ins }
+            if ($sub -lt $best) { $best = $sub }
+            $cur[$j] = $best
         }
+        $tmp = $prev; $prev = $cur; $cur = $tmp
     }
-    return $d[$m, $n]
+    return $prev[$n]
 }
 $global:LookalikeTargets = @('svchost','csrss','lsass','smss','wininit','winlogon','services','explorer','taskhostw','runtimebroker','conhost','dllhost','spoolsv','fontdrvhost','taskmgr','powershell','robloxplayerbeta','robloxplayerlauncher','discord','chrome','msedge','obs64','nvcontainer','mbamservice','audiodg','dwm','sihost','ctfmon','searchindexer','wmiprvse','msmpeng')
 
